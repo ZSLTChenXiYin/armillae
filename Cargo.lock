@@ -70,6 +70,7 @@ dependencies = [
  "armillae-tools",
  "futures",
  "futures-util",
+ "reqwest",
  "rig-core",
  "schemars",
  "secrecy",
