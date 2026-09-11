@@ -14,6 +14,8 @@ pub(crate) mod ollama;
 pub(crate) mod openai;
 
 #[cfg(test)]
+mod redirect_tests;
+#[cfg(test)]
 mod structured_tests;
 #[cfg(test)]
 mod test_support;
@@ -47,6 +49,11 @@ fn build_http_client(config: &BridgeConfig) -> Result<ReqwestClient, BridgeError
     ReqwestClient::builder()
         .connect_timeout(Duration::from_millis(config.transport.connect_timeout_ms))
         .timeout(Duration::from_millis(config.transport.request_timeout_ms))
+        .redirect(if config.transport.max_redirects == 0 {
+            reqwest::redirect::Policy::none()
+        } else {
+            reqwest::redirect::Policy::limited(config.transport.max_redirects)
+        })
         .build()
         .map_err(|_| BridgeError::InvalidConfiguration {
             message: "failed to construct Rig HTTP client".to_owned(),

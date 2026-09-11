@@ -471,3 +471,9 @@ Live 测试已补齐 28 个显式入口，全部保持 ignored；待模型/endpo
 - [x] 全 Provider complete/stream 与结构化模式离线矩阵、UTF-8/EOF/取消/错误回归通过。
 - [x] 完成 fmt、Clippy、相关测试并记录 0.42 Spike 与公开接口/安全审计。
 - [ ] 获得凭证与授权后执行真实 Provider Live 矩阵（离线通过不能替代）。
+
+- [x] 按 Spec 7.5 公开 `TransportConfig.max_redirects`（默认 0），统一全部七个 Provider
+  的 HTTP Client 构造，验证禁用、有限跟随、超限以及非流式/流式失败事实。
+  验证：七个 Provider × complete/stream × 三种策略场景，共 42 组本地 HTTP 检查；
+  相关测试 154 通过、33 Live ignored，格式与 Clippy 通过。Rig SSE 超限错误的具体传输
+  类型缺席，已在 Spec 7.5 记录；不影响次数限制和流式失败终止。

@@ -26,6 +26,7 @@ name = "EXAMPLE_API_KEY"
 [transport]
 connect_timeout_ms = 5000
 request_timeout_ms = 60000
+max_redirects = 3
 
 [defaults]
 temperature = 0.7
@@ -44,6 +45,7 @@ reasoning_effort = "medium"
         .transport(TransportConfig {
             connect_timeout_ms: 5_000,
             request_timeout_ms: 60_000,
+            max_redirects: 3,
         })
         .defaults(GenerationOptions {
             temperature: Some(0.7),
@@ -119,12 +121,14 @@ fn common_validation_rejects_invalid_config_without_provider_guessing() {
             .transport(TransportConfig {
                 connect_timeout_ms: 0,
                 request_timeout_ms: 60_000,
+                ..TransportConfig::default()
             })
             .build(),
         BridgeConfig::builder("openai", "model")
             .transport(TransportConfig {
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 0,
+                ..TransportConfig::default()
             })
             .build(),
         BridgeConfig::builder("openai", "model")
@@ -522,4 +526,15 @@ fn unique_secret_path() -> PathBuf {
             .as_nanos()
     );
     std::env::temp_dir().join(unique)
+}
+
+#[test]
+fn redirect_config_is_backward_readable_and_rejects_invalid_counts() {
+    let legacy = r#"{"connect_timeout_ms":5000,"request_timeout_ms":60000}"#;
+    let transport: TransportConfig = serde_json::from_str(legacy).unwrap();
+    assert_eq!(transport.max_redirects, 0);
+    assert_eq!(TransportConfig::default().max_redirects, 0);
+    for value in [json!(-1), json!(1.5), json!("3"), Value::Null] {
+        assert!(serde_json::from_value::<TransportConfig>(json!({"max_redirects":value})).is_err());
+    }
 }

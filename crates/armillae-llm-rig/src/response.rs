@@ -187,7 +187,10 @@ fn normalize_completion_error(provider: &str, error: CompletionError) -> BridgeE
     }
 }
 
-fn classify_http_error(error: &rig_core::http_client::Error, metadata: &mut ErrorMetadata) {
+pub(crate) fn classify_http_error(
+    error: &rig_core::http_client::Error,
+    metadata: &mut ErrorMetadata,
+) {
     use rig_core::http_client::Error;
     match error {
         Error::InvalidStatusCode(status)

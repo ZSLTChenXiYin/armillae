@@ -572,6 +572,9 @@ impl StreamState {
         if let Some(status) = error.provider_response_status() {
             metadata = metadata.with_http_status(status.as_u16());
         }
+        if let CompletionError::HttpError(http_error) = &error {
+            crate::response::classify_http_error(http_error, &mut metadata);
+        }
         self.interrupted_with_metadata(metadata)
     }
 

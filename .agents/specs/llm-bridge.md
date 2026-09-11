@@ -968,6 +968,7 @@ pub struct BridgeConfig {
 pub struct TransportConfig {
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
+    pub max_redirects: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -983,6 +984,19 @@ pub enum CredentialRef {
 5 秒、请求超时为 60 秒，两者必须大于零；不设置跨 Provider 的任意最大值。同一 Candidate 的
 自动重试不属于 Transport，仍由宿主根据 `BridgeError` 中的事实决定；Router 只执行 RFC 0003
 定义的跨 Candidate fallback，不能把 fallback 隐式变成同一 Candidate 重试。
+
+`TransportConfig.max_redirects` 默认 `0`，禁止自动跟随重定向；正整数表示单次 HTTP 请求
+最多跟随的跳转次数，由 reqwest `Policy::limited(n)` 执行，超限必须失败并停止跟随。
+非流式超限保留 `transport_kind = redirect`；流式使用已有 `StreamInterrupted` 语义。
+Rig 0.42 SSE 路径会将无 HTTP 状态的传输错误字符串化，因此这些流式超限错误的
+`transport_kind` 缺席，不能匹配文本猜测原因；仍保留 typed HTTP 错误的路径复用通用分类器。
+禁用跟随时保留 3xx HTTP 状态作为失败事实，不当作成功结果。
+该契约覆盖全部七个 Provider 的非流式和流式请求。省略字段的旧配置采用新默认值；这将
+默认行为从依赖隐含的最多 10 次跟随改为不跟随。
+
+次数限制不限制目标地址：正数显式启用 reqwest 原有的目标、方法及 header 处理语义，可能
+跨源跳转；构造阶段的宿主 `EndpointPolicy` 不会对跳转目标逐跳执行。本参数不承诺同源
+限制或重定向目标的宿主校验。响应体大小限制不属于本次实现范围，当前仍无显式字节上限。
 
 `BridgeConfig` 的 `api_version` 必须等于 `armillae.llm/v1alpha1`，`provider` 和 `model` 必须
 非空，`provider_options` 必须是 JSON Object。通用层只验证跨 Provider 的结构；
@@ -1012,6 +1026,7 @@ name = "OPENAI_API_KEY"
 [transport]
 connect_timeout_ms = 5000
 request_timeout_ms = 60000
+max_redirects = 0
 
 [defaults]
 temperature = 0.7
