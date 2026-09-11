@@ -264,6 +264,36 @@ fn protocol_schema_is_valid_json_and_matches_snapshot() {
 }
 
 #[test]
+fn structured_modes_round_trip_without_changing_schema_or_history() {
+    for mode in [
+        armillae_core::StructuredOutputMode::NativeStrict,
+        armillae_core::StructuredOutputMode::JsonObjectValidated,
+    ] {
+        let request = CompletionRequest {
+            messages: vec![sample_response().as_assistant_message()],
+            output_format: Some(OutputFormat::Structured {
+                name: "answer".into(),
+                schema: json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+                mode,
+            }),
+            ..Default::default()
+        };
+        round_trip(&request);
+        let mut wire = serde_json::to_value(&request).unwrap();
+        wire["output_format"]["future_field"] = json!({"version":2});
+        assert_eq!(
+            serde_json::from_value::<CompletionRequest>(wire.clone()).unwrap(),
+            request
+        );
+        wire["output_format"]["mode"] = json!("future_mode");
+        assert!(
+            serde_json::from_value::<CompletionRequest>(wire).is_err(),
+            "unknown mode must not fall back"
+        );
+    }
+}
+
+#[test]
 fn tool_call_id_is_a_transparent_non_empty_string() {
     let id = ToolCallId::new("call-1").expect("fixture ToolCall ID is non-empty");
     assert_eq!(

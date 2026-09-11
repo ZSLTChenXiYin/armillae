@@ -24,11 +24,30 @@ pub struct CompletionRequest {
 pub enum OutputFormat {
     Text,
     JsonObject,
+    /// Legacy wire-format request without Bridge-side result validation.
+    /// Use `Structured` to require an explicit enforcement mode and validation.
     JsonSchema {
         name: String,
         schema: Value,
         strict: bool,
     },
+    /// An explicit enforcement mode with final client-side validation.
+    Structured {
+        name: String,
+        schema: Value,
+        mode: StructuredOutputMode,
+    },
+}
+
+/// Where a structured response's schema is enforced during generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StructuredOutputMode {
+    /// The Provider must constrain generation using the supplied schema.
+    NativeStrict,
+    /// The Provider generates JSON; the Bridge validates the result locally.
+    JsonObjectValidated,
 }
 
 /// Generation controls with cross-provider meaning.
