@@ -118,6 +118,16 @@ fn invalid_configuration<T>(message: impl Into<String>) -> Result<T, BridgeError
 }
 
 #[cfg(test)]
+pub(super) fn structured_test_bridge(
+    config: BridgeConfig,
+    credential: Option<SecretString>,
+    client: super::structured_tests::Client,
+) -> Result<Arc<dyn LlmBridge>, BridgeError> {
+    let (config, credential, mapper) = validate_config(config, credential)?;
+    create_validated(config, credential, mapper, client)
+}
+
+#[cfg(test)]
 mod tests {
     use armillae_core::{
         AssistantContent, CompletionRequest, CompletionResponse, FinishReason, Message,
@@ -313,8 +323,8 @@ mod tests {
                 ..CompletionRequest::default()
             };
             let expected = CompletionResponse {
-                id: None,
-                model: None,
+                id: Some("tool-stream".into()),
+                model: Some("provider-model".into()),
                 content: vec![
                     AssistantContent::ToolCall(armillae_core::ToolCall {
                         id: ToolCallId::new("call-weather")
@@ -329,7 +339,7 @@ mod tests {
                         arguments: json!({ "sides": 20 }),
                     }),
                 ],
-                finish_reason: None,
+                finish_reason: Some(FinishReason::ToolCall),
                 usage: Some(TokenUsage {
                     input_tokens: Some(7),
                     output_tokens: Some(4),

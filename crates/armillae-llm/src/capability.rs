@@ -1,4 +1,6 @@
-use armillae_core::{CompletionRequest, ContentPart, OutputFormat, Role, ToolChoice};
+use armillae_core::{
+    CompletionRequest, ContentPart, OutputFormat, Role, StructuredOutputMode, ToolChoice,
+};
 
 use crate::BridgeError;
 
@@ -31,6 +33,10 @@ impl ToolChoiceCapabilities {
 pub struct OutputFormatCapabilities {
     pub json_object: bool,
     pub json_schema: bool,
+    /// Native constrained schema generation, plus final response validation.
+    pub native_strict_schema: bool,
+    /// JSON Object generation, plus final response schema validation.
+    pub json_object_schema_validation: bool,
 }
 
 impl OutputFormatCapabilities {
@@ -38,6 +44,8 @@ impl OutputFormatCapabilities {
         Self {
             json_object: true,
             json_schema: true,
+            native_strict_schema: true,
+            json_object_schema_validation: true,
         }
     }
 }
@@ -68,6 +76,14 @@ impl BridgeCapabilities {
     }
 
     pub fn validate(&self) -> Result<(), BridgeError> {
+        if (self.output_format.native_strict_schema && !self.output_format.json_schema)
+            || (self.output_format.json_object_schema_validation && !self.output_format.json_object)
+        {
+            return Err(BridgeError::InvalidConfiguration {
+                message: "structured output capabilities require their underlying wire format"
+                    .to_owned(),
+            });
+        }
         if !self.tool_calling && (self.parallel_tool_calls || self.tool_choice.any()) {
             return Err(BridgeError::InvalidConfiguration {
                 message: "tool choice and parallel ToolCall capabilities require tool_calling"
@@ -146,6 +162,19 @@ impl BridgeCapabilities {
                         return unsupported("output_format.json_schema");
                     }
                 }
+                OutputFormat::Structured { mode, .. } => match mode {
+                    StructuredOutputMode::NativeStrict => {
+                        if !self.output_format.native_strict_schema {
+                            return unsupported("output_format.native_strict_schema");
+                        }
+                    }
+                    StructuredOutputMode::JsonObjectValidated => {
+                        if !self.output_format.json_object_schema_validation {
+                            return unsupported("output_format.json_object_schema_validation");
+                        }
+                    }
+                    _ => return unsupported("output_format.structured.unknown_mode"),
+                },
                 _ => return unsupported("output_format.unknown"),
             }
         }

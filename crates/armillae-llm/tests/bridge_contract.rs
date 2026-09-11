@@ -187,6 +187,7 @@ fn validates_structured_output_modes_independently() {
         output_format: OutputFormatCapabilities {
             json_object: false,
             json_schema: true,
+            ..OutputFormatCapabilities::default()
         },
         ..BridgeCapabilities::default()
     };
@@ -204,6 +205,7 @@ fn validates_structured_output_modes_independently() {
         output_format: OutputFormatCapabilities {
             json_object: true,
             json_schema: false,
+            ..OutputFormatCapabilities::default()
         },
         ..BridgeCapabilities::default()
     };

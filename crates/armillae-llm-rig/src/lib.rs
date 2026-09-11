@@ -1,5 +1,6 @@
 mod bridge;
 mod convert;
+mod driver;
 mod factory;
 mod observability;
 mod providers;

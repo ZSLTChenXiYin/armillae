@@ -1,24 +1,24 @@
 use std::sync::Arc;
 
+use crate::driver::RigDriver;
 use armillae_core::{CompletionRequest, CompletionResponse, GenerationOptions};
 use armillae_llm::{
-    BoxFuture, BridgeCapabilities, BridgeError, CompletionStream, LlmBridge, ProjectionReport,
+    BoxFuture, BridgeCapabilities, BridgeError, CompletionStream, LlmBridge, OutputValidation,
+    ProjectionReport,
 };
-use rig_core::completion::CompletionModel;
 
 use crate::{
     observability::{self, InvocationObservation},
     request::RigRequestMapper,
-    response::{
-        self, NoopStreamingResponseNormalizer, RigResponseNormalizer,
-        RigStreamingResponseNormalizer,
-    },
+    response::{self, RigResponseNormalizer},
     stream,
 };
 
+// Construction is factory-only; the sealed driver never crosses the public boundary.
+#[allow(private_bounds)]
 pub struct RigBridge<M>
 where
-    M: CompletionModel,
+    M: RigDriver,
 {
     model: M,
     model_name: String,
@@ -26,12 +26,12 @@ where
     defaults: GenerationOptions,
     request_mapper: Arc<dyn RigRequestMapper>,
     normalizer: Arc<dyn RigResponseNormalizer<M::Response>>,
-    streaming_normalizer: Arc<dyn RigStreamingResponseNormalizer<M::StreamingResponse>>,
 }
 
+#[allow(private_bounds)]
 impl<M> RigBridge<M>
 where
-    M: CompletionModel,
+    M: RigDriver,
 {
     pub(crate) fn new(
         model: M,
@@ -41,26 +41,6 @@ where
         request_mapper: Arc<dyn RigRequestMapper>,
         normalizer: Arc<dyn RigResponseNormalizer<M::Response>>,
     ) -> Result<Self, BridgeError> {
-        Self::new_with_streaming_normalizer(
-            model,
-            model_name,
-            capabilities,
-            defaults,
-            request_mapper,
-            normalizer,
-            Arc::new(NoopStreamingResponseNormalizer),
-        )
-    }
-
-    pub(crate) fn new_with_streaming_normalizer(
-        model: M,
-        model_name: impl Into<String>,
-        capabilities: BridgeCapabilities,
-        defaults: GenerationOptions,
-        request_mapper: Arc<dyn RigRequestMapper>,
-        normalizer: Arc<dyn RigResponseNormalizer<M::Response>>,
-        streaming_normalizer: Arc<dyn RigStreamingResponseNormalizer<M::StreamingResponse>>,
-    ) -> Result<Self, BridgeError> {
         capabilities.validate()?;
         Ok(Self {
             model,
@@ -69,16 +49,14 @@ where
             defaults,
             request_mapper,
             normalizer,
-            streaming_normalizer,
         })
     }
 }
 
 impl<M> LlmBridge for RigBridge<M>
 where
-    M: CompletionModel + Send + Sync + 'static,
+    M: RigDriver + Send + Sync + 'static,
     M::Response: Send + Sync,
-    M::StreamingResponse: Send + Sync,
 {
     fn capabilities(&self) -> BridgeCapabilities {
         self.capabilities
@@ -86,6 +64,7 @@ where
 
     fn project(&self, request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
         self.capabilities.validate_request(request)?;
+        OutputValidation::prepare(request.output_format.as_ref())?;
         self.request_mapper
             .map_request(request.clone(), &self.defaults)
             .map(|projection| projection.report)
@@ -104,6 +83,7 @@ where
             );
             let result = async {
                 self.capabilities.validate_request(&request)?;
+                let validation = OutputValidation::prepare(request.output_format.as_ref())?;
                 let projection = self.request_mapper.map_request(request, &self.defaults)?;
                 observability::record_projection(&projection.report);
                 let request = projection.request;
@@ -112,7 +92,9 @@ where
                     .completion(request)
                     .await
                     .map_err(|error| self.normalizer.normalize_error(error))?;
-                response::response_from_rig(response, self.normalizer.as_ref())
+                let response = response::response_from_rig(response, self.normalizer.as_ref())?;
+                validation.validate(&response)?;
+                Ok(response)
             }
             .await;
             observation.finish_completion(&result);
@@ -133,6 +115,7 @@ where
             );
             let result = async {
                 self.capabilities.validate_streaming_request(&request)?;
+                let validation = OutputValidation::prepare(request.output_format.as_ref())?;
                 let projection = self.request_mapper.map_request(request, &self.defaults)?;
                 observability::record_projection(&projection.report);
                 let request = projection.request;
@@ -141,11 +124,8 @@ where
                     .stream(request)
                     .await
                     .map_err(|error| self.normalizer.normalize_error(error))?;
-                Ok(stream::completion_stream_with_normalizer(
-                    response,
-                    self.normalizer.provider(),
-                    self.streaming_normalizer.clone(),
-                ))
+                let stream = stream::completion_stream(response, self.normalizer.provider());
+                Ok(validation.stream(stream, self.normalizer.provider()))
             }
             .await;
             match result {
@@ -174,12 +154,11 @@ mod tests {
     };
     use futures::stream;
     use rig_core::{
-        OneOrMany,
         completion::{
-            CompletionError, CompletionModel, CompletionRequest as RigCompletionRequest,
-            CompletionResponse as RigCompletionResponse, GetTokenUsage, Usage,
+            CompletionError, CompletionRequest as RigCompletionRequest,
+            CompletionResponse as RigCompletionResponse, Usage,
         },
-        streaming::{RawStreamingChoice, StreamingCompletionResponse, StreamingResult},
+        streaming::RawStreamingChoice,
     };
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
@@ -193,60 +172,48 @@ mod tests {
     #[derive(Clone, Debug, Deserialize, Serialize)]
     struct ProbeResponse;
 
-    impl GetTokenUsage for ProbeResponse {
-        fn token_usage(&self) -> Usage {
-            Usage::default()
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct ProbeModel {
-        requests: Arc<Mutex<Vec<RigCompletionRequest>>>,
-    }
-
-    impl CompletionModel for ProbeModel {
-        type Response = ProbeResponse;
-        type StreamingResponse = ProbeResponse;
-        type Client = ();
-
-        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
-            Self::default()
-        }
-
-        async fn completion(
-            &self,
-            request: RigCompletionRequest,
-        ) -> Result<RigCompletionResponse<Self::Response>, CompletionError> {
-            self.requests
-                .lock()
-                .expect("the probe request lock must not be poisoned")
-                .push(request);
-            Ok(RigCompletionResponse {
-                choice: OneOrMany::one(rig_core::message::AssistantContent::text("hello")),
-                usage: Usage {
+    impl crate::driver::NativeResponse for ProbeResponse {
+        fn normalize_native(
+            self,
+            provider: &str,
+        ) -> Result<RigCompletionResponse, CompletionError> {
+            Ok(RigCompletionResponse::new(
+                vec![rig_core::message::AssistantContent::text("hello")],
+                Usage {
                     input_tokens: 3,
                     output_tokens: 2,
                     total_tokens: 5,
                     ..Usage::default()
                 },
-                raw_response: ProbeResponse,
-                message_id: None,
-            })
+                provider,
+            ))
         }
-
+    }
+    #[derive(Clone, Default)]
+    struct ProbeModel {
+        requests: Arc<Mutex<Vec<RigCompletionRequest>>>,
+    }
+    impl crate::driver::RigDriver for ProbeModel {
+        type Response = ProbeResponse;
+        async fn completion(
+            &self,
+            request: RigCompletionRequest,
+        ) -> Result<ProbeResponse, CompletionError> {
+            self.requests.lock().expect("probe lock").push(request);
+            Ok(ProbeResponse)
+        }
         async fn stream(
             &self,
             request: RigCompletionRequest,
-        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
-            self.requests
-                .lock()
-                .expect("the probe request lock must not be poisoned")
-                .push(request);
-            let inner: StreamingResult<ProbeResponse> = Box::pin(stream::iter([
+        ) -> Result<rig_core::streaming::RawStreamingResult<crate::driver::Terminal>, CompletionError>
+        {
+            self.requests.lock().expect("probe lock").push(request);
+            Ok(Box::pin(stream::iter([
                 Ok(RawStreamingChoice::Message("hello".to_owned())),
-                Ok(RawStreamingChoice::FinalResponse(ProbeResponse)),
-            ]));
-            Ok(StreamingCompletionResponse::stream(inner))
+                Ok(RawStreamingChoice::FinalResponse(
+                    crate::driver::Terminal::default(),
+                )),
+            ])))
         }
     }
 

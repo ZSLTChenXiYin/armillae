@@ -11,11 +11,10 @@ use std::{
 
 use futures::{Stream, StreamExt, stream};
 use rig_core::{
-    OneOrMany,
     client::CompletionClient,
     completion::{
-        CompletionError, CompletionModel, CompletionRequest, CompletionResponse, GetTokenUsage,
-        ToolDefinition, Usage,
+        CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
+        NormalizeCompletionResponse, ToolDefinition, Usage,
     },
     message::{AssistantContent, Message, ToolResultContent, UserContent},
     providers::{anthropic, openai},
@@ -25,22 +24,7 @@ use rig_core::{
     },
     test_utils::{RecordingHttpClient, SequencedStreamingHttpClient},
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct ProbeResponse {
-    total_tokens: u64,
-}
-
-impl GetTokenUsage for ProbeResponse {
-    fn token_usage(&self) -> Usage {
-        Usage {
-            total_tokens: self.total_tokens,
-            ..Usage::default()
-        }
-    }
-}
 
 #[derive(Clone, Default)]
 struct ProbeModel {
@@ -48,25 +32,17 @@ struct ProbeModel {
 }
 
 impl CompletionModel for ProbeModel {
-    type Response = ProbeResponse;
-    type StreamingResponse = ProbeResponse;
-    type Client = ();
-
-    fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
-        Self::default()
-    }
-
     async fn completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+    ) -> Result<CompletionResponse, CompletionError> {
         self.requests
             .lock()
             .expect("the P0 probe request mutex must not be poisoned")
             .push(request);
 
-        Ok(CompletionResponse {
-            choice: many(vec![
+        Ok(CompletionResponse::new(
+            many(vec![
                 AssistantContent::tool_call(
                     "call-weather",
                     "get_weather",
@@ -82,28 +58,28 @@ impl CompletionModel for ProbeModel {
                     }),
                 ),
             ]),
-            usage: Usage {
+            Usage {
                 input_tokens: 10,
                 output_tokens: 5,
                 total_tokens: 15,
                 ..Usage::default()
             },
-            raw_response: ProbeResponse { total_tokens: 15 },
-            message_id: Some("message-1".to_owned()),
-        })
+            "probe",
+        )
+        .with_message_id("message-1"))
     }
 
     async fn stream(
         &self,
         _request: CompletionRequest,
-    ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
-        let inner: StreamingResult<ProbeResponse> = Box::pin(stream::empty());
-        Ok(StreamingCompletionResponse::stream(inner))
+    ) -> Result<StreamingCompletionResponse, CompletionError> {
+        let inner: StreamingResult = Box::pin(stream::empty());
+        Ok(StreamingCompletionResponse::stream("probe", inner))
     }
 }
 
-fn many<T: Clone>(items: Vec<T>) -> OneOrMany<T> {
-    OneOrMany::many(items).expect("P0 fixtures always contain at least two items")
+fn many<T: Clone>(items: Vec<T>) -> Vec<T> {
+    items
 }
 
 fn tool_definition(name: &str) -> ToolDefinition {
@@ -118,10 +94,10 @@ fn tool_definition(name: &str) -> ToolDefinition {
     }
 }
 
-fn tool_history() -> OneOrMany<Message> {
+fn tool_history() -> Vec<Message> {
     many(vec![
         Message::User {
-            content: OneOrMany::one(UserContent::text("Use both tools.")),
+            content: vec![UserContent::text("Use both tools.")],
         },
         Message::Assistant {
             id: Some("assistant-message-1".to_owned()),
@@ -146,13 +122,15 @@ fn tool_history() -> OneOrMany<Message> {
             content: many(vec![
                 UserContent::tool_result(
                     "call-weather",
-                    OneOrMany::one(ToolResultContent::json(json!({
+                    "get_weather",
+                    vec![ToolResultContent::json(json!({
                         "condition": "rain"
-                    }))),
+                    }))],
                 ),
                 UserContent::tool_result(
                     "call-dice",
-                    OneOrMany::one(ToolResultContent::json(json!({ "value": 17 }))),
+                    "roll_dice",
+                    vec![ToolResultContent::json(json!({ "value": 17 }))],
                 ),
                 UserContent::text("Summarize the results."),
             ]),
@@ -176,11 +154,11 @@ fn completion_request() -> CompletionRequest {
     }
 }
 
-fn tool_call_ids(items: OneOrMany<AssistantContent>) -> Vec<String> {
+fn tool_call_ids(items: Vec<AssistantContent>) -> Vec<String> {
     items
         .into_iter()
         .filter_map(|item| match item {
-            AssistantContent::ToolCall(call) => Some(call.id),
+            AssistantContent::ToolCall(call) => Some(call.id.into_string()),
             _ => None,
         })
         .collect()
@@ -457,8 +435,8 @@ fn provider_responses_preserve_multiple_tool_call_ids_and_order() {
         }
     }))
     .expect("the OpenAI P0 response fixture must deserialize");
-    let openai_generic: CompletionResponse<_> = openai_response
-        .try_into()
+    let openai_generic: CompletionResponse = openai_response
+        .normalize("openai")
         .expect("the OpenAI P0 response must normalize");
     assert_eq!(
         tool_call_ids(openai_generic.choice),
@@ -494,8 +472,8 @@ fn provider_responses_preserve_multiple_tool_call_ids_and_order() {
             }
         }))
         .expect("the Anthropic P0 response fixture must deserialize");
-    let anthropic_generic: CompletionResponse<_> = anthropic_response
-        .try_into()
+    let anthropic_generic: CompletionResponse = anthropic_response
+        .normalize("anthropic")
         .expect("the Anthropic P0 response must normalize");
     assert_eq!(
         tool_call_ids(anthropic_generic.choice),
@@ -574,68 +552,66 @@ async fn interleaved_stream_deltas_reassemble_by_stable_internal_call_id() {
     let items = vec![
         RawStreamingChoice::Message("start".to_owned()),
         RawStreamingChoice::ToolCallDelta {
-            id: "call-weather".to_owned(),
-            internal_call_id: "internal-weather".to_owned(),
+            id: "call-weather".into(),
             content: ToolCallDeltaContent::Name("get_".to_owned()),
         },
         RawStreamingChoice::ToolCallDelta {
-            id: "call-dice".to_owned(),
-            internal_call_id: "internal-dice".to_owned(),
+            id: "call-dice".into(),
             content: ToolCallDeltaContent::Name("roll_".to_owned()),
         },
         RawStreamingChoice::ToolCallDelta {
-            id: "call-weather".to_owned(),
-            internal_call_id: "internal-weather".to_owned(),
+            id: "call-weather".into(),
             content: ToolCallDeltaContent::Name("weather".to_owned()),
         },
         RawStreamingChoice::ToolCallDelta {
-            id: "call-weather".to_owned(),
-            internal_call_id: "internal-weather".to_owned(),
+            id: "call-weather".into(),
             content: ToolCallDeltaContent::Delta("{\"city\":\"上".to_owned()),
         },
         RawStreamingChoice::ToolCallDelta {
-            id: "call-dice".to_owned(),
-            internal_call_id: "internal-dice".to_owned(),
+            id: "call-dice".into(),
             content: ToolCallDeltaContent::Name("dice".to_owned()),
         },
         RawStreamingChoice::ToolCallDelta {
-            id: "call-dice".to_owned(),
-            internal_call_id: "internal-dice".to_owned(),
+            id: "call-dice".into(),
             content: ToolCallDeltaContent::Delta("{\"sides\":".to_owned()),
         },
         RawStreamingChoice::ToolCallDelta {
-            id: "call-weather".to_owned(),
-            internal_call_id: "internal-weather".to_owned(),
+            id: "call-weather".into(),
             content: ToolCallDeltaContent::Delta("海\"}".to_owned()),
         },
         RawStreamingChoice::ToolCallDelta {
-            id: "call-dice".to_owned(),
-            internal_call_id: "internal-dice".to_owned(),
+            id: "call-dice".into(),
             content: ToolCallDeltaContent::Delta("20}".to_owned()),
         },
-        RawStreamingChoice::ToolCall(
-            RawStreamingToolCall::new(
-                "call-weather".to_owned(),
-                "get_weather".to_owned(),
-                json!({ "city": "上海" }),
-            )
-            .with_internal_call_id("internal-weather".to_owned()),
-        ),
-        RawStreamingChoice::ToolCall(
-            RawStreamingToolCall::new(
-                "call-dice".to_owned(),
-                "roll_dice".to_owned(),
-                json!({ "sides": 20 }),
-            )
-            .with_internal_call_id("internal-dice".to_owned()),
-        ),
-        RawStreamingChoice::FinalResponse(ProbeResponse { total_tokens: 20 }),
-        RawStreamingChoice::FinalResponse(ProbeResponse { total_tokens: 99 }),
+        RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+            "call-weather".to_owned(),
+            "get_weather".to_owned(),
+            json!({ "city": "上海" }),
+        )),
+        RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+            "call-dice".to_owned(),
+            "roll_dice".to_owned(),
+            json!({ "sides": 20 }),
+        )),
+        RawStreamingChoice::FinalResponse(rig_core::streaming::StreamFinal::new(
+            "probe",
+            Usage {
+                total_tokens: 20,
+                ..Usage::default()
+            },
+        )),
+        RawStreamingChoice::FinalResponse(rig_core::streaming::StreamFinal::new(
+            "probe",
+            Usage {
+                total_tokens: 99,
+                ..Usage::default()
+            },
+        )),
     ]
     .into_iter()
     .map(Ok);
-    let inner: StreamingResult<ProbeResponse> = Box::pin(stream::iter(items));
-    let mut response = StreamingCompletionResponse::stream(inner);
+    let inner: StreamingResult = Box::pin(stream::iter(items));
+    let mut response = StreamingCompletionResponse::stream("probe", inner);
     let mut assembler = ToolDeltaAssembler::default();
     let mut text_deltas = Vec::new();
     let mut completed_ids = Vec::new();
@@ -645,15 +621,20 @@ async fn interleaved_stream_deltas_reassemble_by_stable_internal_call_id() {
         match item.expect("the P0 stream must not fail") {
             StreamedAssistantContent::Text(text) => text_deltas.push(text.text),
             StreamedAssistantContent::ToolCallDelta {
-                id,
                 internal_call_id,
                 content,
-            } => assembler.push(&id, &internal_call_id, &content),
-            StreamedAssistantContent::ToolCall { tool_call, .. } => {
-                completed_ids.push(tool_call.id);
+            } => assembler.push("", &internal_call_id, &content),
+            StreamedAssistantContent::ToolCall {
+                tool_call,
+                internal_call_id,
+            } => {
+                if let Some(call) = assembler.calls.get_mut(&internal_call_id) {
+                    call.id = tool_call.id.to_string();
+                }
+                completed_ids.push(tool_call.id.to_string());
             }
             StreamedAssistantContent::Final(_) => final_count += 1,
-            StreamedAssistantContent::Reasoning(_)
+            StreamedAssistantContent::Reasoning { .. }
             | StreamedAssistantContent::ReasoningDelta { .. }
             | StreamedAssistantContent::Unknown(_) => {}
         }
@@ -819,21 +800,22 @@ async fn openai_stream_survives_arbitrary_http_and_utf8_chunk_boundaries() {
     while let Some(item) = stream.next().await {
         match item.expect("the OpenAI P0 stream must parse every byte chunk") {
             StreamedAssistantContent::ToolCallDelta {
-                id,
-                internal_call_id,
-                ..
+                internal_call_id, ..
             } => {
-                if !id.is_empty() {
-                    let existing = internal_ids.entry(id).or_insert(internal_call_id.clone());
-                    assert_eq!(existing, &internal_call_id);
-                }
+                internal_ids
+                    .entry(internal_call_id.clone())
+                    .or_insert(internal_call_id);
             }
-            StreamedAssistantContent::ToolCall { tool_call, .. } => {
+            StreamedAssistantContent::ToolCall {
+                tool_call,
+                internal_call_id,
+            } => {
+                assert!(internal_ids.contains_key(&internal_call_id));
                 complete_calls.push(tool_call);
             }
             StreamedAssistantContent::Text(_)
             | StreamedAssistantContent::Final(_)
-            | StreamedAssistantContent::Reasoning(_)
+            | StreamedAssistantContent::Reasoning { .. }
             | StreamedAssistantContent::ReasoningDelta { .. }
             | StreamedAssistantContent::Unknown(_) => {}
         }
@@ -857,7 +839,7 @@ struct DropAwareStream {
 }
 
 impl Stream for DropAwareStream {
-    type Item = Result<RawStreamingChoice<ProbeResponse>, CompletionError>;
+    type Item = Result<RawStreamingChoice, CompletionError>;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Pending
@@ -875,7 +857,7 @@ struct DropAwareCompletionFuture {
 }
 
 impl Future for DropAwareCompletionFuture {
-    type Output = Result<CompletionResponse<ProbeResponse>, CompletionError>;
+    type Output = Result<CompletionResponse, CompletionError>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         Poll::Pending
@@ -894,21 +876,10 @@ struct DropAwareModel {
 }
 
 impl CompletionModel for DropAwareModel {
-    type Response = ProbeResponse;
-    type StreamingResponse = ProbeResponse;
-    type Client = Arc<AtomicBool>;
-
-    fn make(client: &Self::Client, _model: impl Into<String>) -> Self {
-        Self {
-            completion_dropped: Arc::clone(client),
-        }
-    }
-
     fn completion(
         &self,
         _request: CompletionRequest,
-    ) -> impl Future<Output = Result<CompletionResponse<Self::Response>, CompletionError>> + Send
-    {
+    ) -> impl Future<Output = Result<CompletionResponse, CompletionError>> + Send {
         DropAwareCompletionFuture {
             dropped: Arc::clone(&self.completion_dropped),
         }
@@ -917,9 +888,7 @@ impl CompletionModel for DropAwareModel {
     fn stream(
         &self,
         _request: CompletionRequest,
-    ) -> impl Future<
-        Output = Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError>,
-    > + Send {
+    ) -> impl Future<Output = Result<StreamingCompletionResponse, CompletionError>> + Send {
         std::future::ready(Err(CompletionError::ResponseError(
             "the P0 drop-aware model does not provide a stream".to_owned(),
         )))
@@ -929,16 +898,18 @@ impl CompletionModel for DropAwareModel {
 #[test]
 fn dropping_completion_future_and_stream_release_their_inner_resources() {
     let completion_dropped = Arc::new(AtomicBool::new(false));
-    let model = DropAwareModel::make(&completion_dropped, "p0-model");
+    let model = DropAwareModel {
+        completion_dropped: completion_dropped.clone(),
+    };
     let future = model.completion(completion_request());
     drop(future);
     assert!(completion_dropped.load(Ordering::SeqCst));
 
     let stream_dropped = Arc::new(AtomicBool::new(false));
-    let inner: StreamingResult<ProbeResponse> = Box::pin(DropAwareStream {
+    let inner: StreamingResult = Box::pin(DropAwareStream {
         dropped: Arc::clone(&stream_dropped),
     });
-    let response = StreamingCompletionResponse::stream(inner);
+    let response = StreamingCompletionResponse::stream("probe", inner);
     drop(response);
     assert!(stream_dropped.load(Ordering::SeqCst));
 }

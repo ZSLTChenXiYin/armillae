@@ -28,7 +28,9 @@ The implemented LLM foundation currently provides:
 The OpenAI-protocol baseline still requires an explicit end-to-end Provider/model scenario matrix
 before a formal full-support claim. The native Anthropic Messages adapter uses a conservative
 profile: requests require `max_output_tokens`, `ToolResult.is_error = true` is rejected because Rig
-0.41 cannot preserve it, and raw unknown Anthropic SSE events filtered by Rig are not exposed.
+0.42 cannot preserve it. Unknown Anthropic events exposed by Rig are retained as ProviderEvent.
+All adapters pin Rig 0.42.0; streaming success requires a real provider terminal event, and
+structured output additionally requires final JSON/Schema validation.
 Ollama uses a conservative native profile and generates Armillae ToolCall IDs because its wire
 protocol does not provide them.
 

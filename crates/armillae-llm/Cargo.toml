@@ -17,6 +17,7 @@ mock = []
 [dependencies]
 armillae-core = { version = "0.1.0-alpha.1", path = "../armillae-core" }
 futures-util = "0.3"
+jsonschema = { version = "=0.33.0", default-features = false }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

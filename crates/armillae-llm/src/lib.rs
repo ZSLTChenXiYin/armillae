@@ -8,6 +8,7 @@ mod factory;
 #[cfg(feature = "mock")]
 pub mod mock;
 mod projection;
+mod structured;
 
 pub use bridge::{BoxFuture, CompletionStream, LlmBridge};
 pub use capability::{BridgeCapabilities, OutputFormatCapabilities, ToolChoiceCapabilities};
@@ -15,7 +16,7 @@ pub use config::{
     BRIDGE_CONFIG_API_VERSION, BridgeConfig, BridgeConfigBuilder, BridgeResolveContext,
     CredentialRef, EndpointPolicy, ResolvedBridgeConfig, SecretResolver, TransportConfig,
 };
-pub use error::{BridgeError, ErrorMetadata, TransportErrorKind};
+pub use error::{BridgeError, ErrorMetadata, StructuredOutputErrorKind, TransportErrorKind};
 pub use factory::BridgeFactory;
 #[cfg(feature = "mock")]
 pub use mock::{MockBridge, MockResponse};
@@ -23,3 +24,4 @@ pub use projection::{
     CompatibilityAction, CompatibilityFact, MessageContentLocation, ProjectionReport,
 };
 pub use secrecy::SecretString;
+pub use structured::OutputValidation;

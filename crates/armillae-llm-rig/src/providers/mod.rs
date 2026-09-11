@@ -14,6 +14,8 @@ pub(crate) mod ollama;
 pub(crate) mod openai;
 
 #[cfg(test)]
+mod structured_tests;
+#[cfg(test)]
 mod test_support;
 
 fn validate_named_config(

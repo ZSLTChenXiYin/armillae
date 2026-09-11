@@ -2,6 +2,7 @@
 
 > 状态：Active Spec；直接 Bridge canonical 投影离线实现已完成；fallback Router 待实现
 > 规范基线：2026-08-27
+> 结构化结果增量：2026-09-11；EOF 假完成回归未通过，不宣称全量实现完成
 > 适用范围：`armillae-core`、`armillae-llm`、`armillae-tools`、`armillae-tools-macros`、
 > `armillae-llm-rig`
 > 设计入口：[Armillae 设计索引](../DESIGN.md)
@@ -313,7 +314,7 @@ crates/armillae-rag/              # 组合检索、重排、上下文组装与 L
 | `armillae-tools-macros` | `armillae-tools`、`syn`、`quote`、`proc-macro2` |
 | `armillae-llm-rig` | `armillae-core`、`armillae-llm`、`rig-core`、`futures-util`、`tokio` |
 
-公共 Bridge 和 Tool 接口只暴露标准 `Future`/`Stream` 语义，不把 Tokio 类型放入协议层。首个 rig Adapter 可以使用 Tokio 作为执行环境。rig 依赖以 Spike 验证过的精确版本锁定；本设计调研基线为 `rig-core = 0.41.0`。
+公共 Bridge 和 Tool 接口只暴露标准 `Future`/`Stream` 语义，不把 Tokio 类型放入协议层。首个 rig Adapter 可以使用 Tokio 作为执行环境。rig 依赖以 Spike 验证过的精确版本锁定；当前精确锁定 `rig-core = 0.42.0`；迁移依据为 RFC 0004 和 0.42 Spike。
 
 Workspace 初始化阶段只添加上述 crate 之间的本地 path 依赖。外部依赖在对应实现开始且实际
 需要时通过 Cargo CLI 引入，避免空 crate 提前携带未使用依赖；这不改变本节记录的第一阶段
@@ -518,6 +519,11 @@ pub enum OutputFormat {
         schema: serde_json::Value,
         strict: bool,
     },
+    Structured {
+        name: String,
+        schema: serde_json::Value,
+        mode: StructuredOutputMode,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -681,6 +687,8 @@ pub struct ToolChoiceCapabilities {
 pub struct OutputFormatCapabilities {
     pub json_object: bool,
     pub json_schema: bool,
+    pub native_strict_schema: bool,
+    pub json_object_schema_validation: bool,
 }
 ```
 
@@ -707,6 +715,85 @@ Provider 的部分支持。`tool_calling = false` 时所有 ToolChoice 能力必
 `BridgeConfig` 中提供能力覆盖。Adapter 不得声称底层实际不具备的能力；宿主若需要主动关闭
 已支持能力，可以在 Bridge 外层实施策略。只有出现稳定的跨宿主需求后，才设计纯收紧的能力
 限制配置。
+
+### 7.2.1 显式结构化结果
+
+用户于 2026-09-10 确认两种显式模式并要求全部 Provider、complete 和 stream 一并覆盖。
+新增 `OutputFormat::Structured { name, schema, mode }`，其中
+`StructuredOutputMode::{NativeStrict, JsonObjectValidated}` 分别表示服务端原生严格 Schema
+和 JSON Object 加客户端 Schema 校验。原有 Text、JsonObject、JsonSchema 的 wire 与返回契约
+保持不变；原有 `json_schema` 能力只说明 Schema 请求承载能力，不等价于新模式的严格承诺。
+
+`OutputFormatCapabilities` 新增 `native_strict_schema` 和 `json_object_schema_validation`。
+前者依赖 `json_schema`，后者依赖 `json_object`；二者是独立能力，不得互相替代。所有已支持
+Provider 的非流式与流式采用同一模式能力矩阵：
+
+| Provider 配置入口 | NativeStrict | JsonObjectValidated |
+| --- | --- | --- |
+| openai | 支持 OpenAI strict profile | 支持 |
+| openai-compatible | 宿主显式声明符合 OpenAI strict profile | 支持 |
+| anthropic | 支持，保留现有无损 Schema 子集预检 | 不支持，发送前拒绝 |
+| ollama | 支持本地 Schema constrained generation profile | 支持 |
+| deepseek | 不支持，发送前拒绝 | 支持 |
+| moonshot | 不支持，发送前拒绝 | 支持 |
+| minimax | 当前接入路径未确认严格保证，发送前拒绝 | 支持 |
+
+MiniMax 既有 JsonSchema wire 承载继续保留，不能据此推导原生严格保证。Ollama profile 针对
+支持结构化输出的本地服务；Ollama Cloud 不支持此功能。固定 profile 仍不是模型发现机制，
+远端不兼容应返回结构化拒绝或结果验证错误，不能自动换模式、换 Provider 或删改 Schema。
+Provider 的 Schema 子集限制仍适用，不能把“不支持该 Schema”说成“已完整执行该 Schema”。
+新 NativeStrict 模式在 Rig 路径使用明确的保守子集：根为 object；支持 type、properties、
+required、additionalProperties=false、items、enum、anyOf、$defs、局部 $ref 与描述性
+title/description/$schema。所有 object 的属性必须 required；未知或其它断言关键字（如
+minimum、pattern、oneOf）在本地拒绝，不能依靠客户端补验冒充服务端已执行这些约束。
+这不改变旧 JsonSchema 路径；客户端校验模式仍可使用校验器支持的数值、字符串等断言。
+
+两个新模式均在发送前编译客户端校验器，在返回成功前执行同一最终结果校验。NativeStrict
+的本地校验是服务端契约的防御性复核，不是替代原生约束。JsonObjectValidated 的 Schema
+仅用于客户端，不进入服务端 response_format；调用方负责在 messages 中说明 JSON 和目标
+结构，Adapter 不自动追加提示词或修改 canonical history。native wire 复用对应 Provider 的
+`JsonSchema { strict: true }`，client wire 复用 JsonObject。
+
+校验器由 `armillae-llm` 持有，选用本地已可检查的 `jsonschema = 0.33.0` 精确版本，关闭
+默认 HTTP/file retrieval features，并注入拒绝外部检索的 retriever，避免 Cargo feature
+合并重新开启检索。支持 Draft 4/6/7/2019-09/2020-12（缺省 2020-12），未知 dialect、无法
+解析的引用或无效 Schema 在发送前拒绝；引用只解析随 Schema 提供的内存资源。format
+采用 JSON Schema annotation 语义，不额外开启 format assertion；不宣称支持任意扩展
+vocabulary。校验库错误不携带原始 Schema/响应进入公共错误、Debug 或 tracing。
+
+Structured 模式要求非空 name、object 类型的 Schema 文档和最终 JSON object。返回的 Text
+按既有内容顺序拼接后解析，不剥离 Markdown、不尝试修复、不丢弃 ToolCall；含 ToolCall、
+无文本、非法 JSON、非 object、Schema 不匹配或已暴露的显式非正常 finish reason 均返回
+`BridgeError::StructuredOutput { kind }`。kind 使用枚举区分失败事实，不包含输入/输出值。
+ProviderData 仍原样保留。缺失 finish reason 保持缺失，不能伪造 Stop；有真实终端事件且
+文本通过校验时可以成功。`InvalidOutputSchema` 区分请求 Schema 错误和响应验证失败。
+按 RFC 0004 使用 Rig 0.42.0 原生 typed Driver：先从原生响应提取事实，再转换内容；流式直接
+提取原生终端事实并复用 Rig 公共内容聚合器，不使用 Rig 对 finish reason 的输出推断。Provider
+真实终端原因与可用身份字段必须保留；缺席保持缺席。首次错误即终止，不继续消费触发重连。
+Rig 负责唯一请求与字节解析，Armillae 不增加 HTTP 观察层或第二套 SSE parser。
+
+stream 仍实时转发原索引的增量、ProviderData、Usage 和 Tool 事件，增量是未验证的预览。
+只在最终 ResponseCompleted 的完整响应通过校验后发出该成功事件；失败只发一次 Err
+并结束，不能先发成功再报错。缺失终端事件必须报 StreamInterrupted；drop 直接释放底层
+流，不后台排空、不重试。此规则与 complete 共享校验代码。
+
+Mock HTTP 使用 `bytes` 1.x 作为 Adapter 的 dev-dependency 捕获两种调用方式的请求与分片，
+不增加生产传输层；Rig 按 RFC 0004 精确升级。
+验收必须覆盖全部七个入口的两种模式 × 两种调用方式，包括支持路径的 wire 和最终校验、
+不支持路径的零网络调用、Schema 错误、JSON/Schema 失败、截断、拒绝、ToolCall、任意分片、
+UTF-8、内容索引、Usage、唯一完成、流中断和 drop 取消。协议 round-trip 与 Schema 快照
+同步；MockBridge 复用相同校验。默认 ignored 的 Live 测试不得自动选择另一模式；每个入口
+需明确凭证/模型与授权才运行，没有 Live 证据时全量验收项保持未完成。
+
+参考（2026-09-10 核对）：[DeepSeek Chat](https://api-docs.deepseek.com/api/create-chat-completion/)、
+[Anthropic structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)、
+[Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs)、
+[MiniMax OpenAI API](https://platform.minimax.io/docs/api-reference/text-openai-api)。
+
+实施证据（2026-09-11）：Rig 0.42.0 升级后，全部配置入口的 wire/校验、能力拒绝、Schema
+失败、合法 JSON 后 EOF、结束原因、首错终止与取消离线回归通过。修复边界见
+[RFC 0004 Accepted](../rfcs/0004-stream-terminal-evidence.md)，验证见
+[0.42 Spike](../spikes/rig-core-0.42.0.md)。授权 Live 矩阵尚未执行。
 
 ### 7.3 流式事件
 
@@ -1421,7 +1508,7 @@ proc-macro crate。这样使用宏的下游显式依赖两者，手写 `Tool` �
 
 ### 9.2 泛型与类型擦除
 
-rig 的 `CompletionModel` 不是 dyn-compatible，因此 Adapter 内部使用泛型，对外通过 Armillae Bridge 擦除类型：
+Adapter 用私有 `RigDriver` 封装 Rig 的原生调用；内部使用泛型，对外通过 Armillae Bridge 擦除类型：
 
 ```rust
 pub struct RigBridge<M> {
@@ -1434,9 +1521,8 @@ pub struct RigBridge<M> {
 
 impl<M> LlmBridge for RigBridge<M>
 where
-    M: rig_core::completion::CompletionModel + Send + Sync + 'static,
+    M: RigDriver + Send + Sync + 'static,
     M::Response: Send + Sync,
-    M::StreamingResponse: Send + Sync,
 {
     // Armillae 与 Rig 协议转换
 }
@@ -1456,16 +1542,20 @@ Provider/Adapter 命名空间，并可覆盖同名的 Provider 特有选项。�
 类型必须在请求发送前拒绝。`provider_options` 和请求扩展都不得重复设置或覆盖已经由
 `GenerationOptions`、`OutputFormat`、`ToolChoice` 等公共字段表达的标准语义。
 
-rig 的通用 `CompletionResponse<T>` 只标准化 choice、usage 和 message ID；实际模型、完整结束
-原因及部分安全 metadata 仍位于 Provider-specific `raw_response`。`RigBridge<M>` 因此持有一个
-私有、窄化的 `RigResponseNormalizer<M::Response>`，由对应 Provider Factory 注入。Normalizer
-只负责从 raw response 提取 Armillae 已定义的响应事实和经过筛选的 metadata，不重新实现
-请求发送，也不把完整 raw response 暴露到公共协议。
+Rig 0.42 的通用 CompletionResponse 已移除响应泛型并增加统一事实，但会按输出推断结束原因。
+Adapter 因此通过 raw_completion 取得原生类型，用私有 RigResponseNormalizer 提取 Provider
+事实，再消费该类型完成内容和 Usage 转换，不采用通用响应推断的 finish reason。
+
+私有 Driver 的流式接口返回带 typed Terminal 的原生事件流。终端进入请求私有槽位，内容由
+Rig 公共聚合器恢复 Provider 工具 ID 与 reasoning 生命周期，再转换成 Armillae 事件。保留
+既有双层聚合；槽位只在终端写入/取出，不序列化整份响应，不形成新的 HTTP 或重试层。
+消息容器改为 Vec，Armillae 仍在请求边界执行非空校验。ToolResult 的 name 和 Provider 关联
+身份从前序 Assistant ToolCall 恢复；保持 canonical ToolCall ID，不将工具名称塞进 ID 字段。
 
 `RigRequestMapper` 和 `RigResponseNormalizer` 继续是两个单向边界，不合并为同时负责请求、
 响应或传输的宽泛 Provider 对象；但它们必须共享同一个 Provider 的 replay 规则或窄化 codec
 helper，保证 Normalizer 产生的已知 ProviderData 能由 Request Mapper 验证并还原。实际网络
-调用始终只由 rig `CompletionModel` 执行。
+调用始终由 Rig 原生 raw_completion/raw_stream 执行。
 
 不得根据“是否出现 ToolCall”等内容猜测 Provider 缺失或已明确返回的结束原因。Provider
 没有报告结束原因时保持 `None`，返回未知结束值时转换为
@@ -1550,13 +1640,13 @@ ToolChoice、JSON Schema 和 System role；不支持 Developer role 与 JSON Obj
 出现在消息历史开头，避免 rig 将中途 System 静默重排到顶层。Anthropic 请求必须由构造期默认值
 或单次请求显式提供 `max_output_tokens`；`stop` 映射为 `stop_sequences`，`seed` 因 Provider
 不支持而本地拒绝。JSON Schema 必须使用 `strict = true`；Anthropic wire 只接收 schema，不接收
-公共协议中的描述性 name，因此 Adapter 校验 name 非空后不下发该字段。rig 0.41 会为 Anthropic
+公共协议中的描述性 name，因此 Adapter 校验 name 非空后不下发该字段。rig 0.42 会为 Anthropic
 自动补齐 required/additionalProperties、移除数字约束并将 oneOf 改为 anyOf；Adapter 必须先
 验证 schema 已属于不会发生语义改写的严格子集：所有 object 属性均 required、
 `additionalProperties = false`、无数字约束且无 oneOf。不符合时本地拒绝，不能交给 rig 静默
 放宽。ToolResult 的 JSON content 由 rig 按 Anthropic wire 能力序列化为紧凑 JSON 文本。
 
-Anthropic wire 原生支持 `ToolResult.is_error`，但 rig 0.41 的通用 `ToolResult` 不承载该字段，
+Anthropic wire 原生支持 `ToolResult.is_error`，但 rig 0.42 的通用 `ToolResult` 不承载该字段，
 并固定转换为 `is_error: None`。为避免静默丢失错误事实，Rig Anthropic Adapter 允许
 `is_error = false`（wire 缺失等价于 false），对 `is_error = true` 返回 `InvalidRequest`；本阶段
 不为这一字段复制 Anthropic 请求类型或建立自有 HTTP 传输层。需要原生错误标记的调用方应选择
@@ -1567,14 +1657,11 @@ Anthropic 非流式响应要求非空 ID 和 model；`end_turn`/`stop_sequence` 
 `FinishReason::Unknown`。`stop_sequence` 与 cache-creation token usage 只进入受控 metadata。
 流式路径复用统一状态机；Anthropic 在 reasoning delta 后给出的完整带签名 Reasoning 必须完成并
 替换同一 content index，不能生成重复 ProviderData block。P7 必须审计该 signed reasoning 的
-同 Provider 请求回放；签名无法由 Rig 0.41 安全还原时应形成 Candidate projection failure，
+同 Provider 请求回放；签名无法由 Rig 0.42 安全还原时应形成 Candidate projection failure，
 由 Router 决定 fallback，不得仅删除签名后继续请求。
 
-rig 0.41 会在 Anthropic Provider parser 内过滤 `StreamingEvent::Unknown` 和未知 delta，且其
-公开 terminal stream item 不携带 response ID、model 或 finish reason。Adapter 对已经暴露的
-rig Unknown item 继续生成 `ProviderEvent`，但不复制传输层来捕获 rig 未暴露的原始 SSE；相应
-终端事实保持 `None`，不得推断。需要原始未知 Anthropic SSE 的使用场景应选择保留该能力的其它
-Driver。这是 Rig Provider 边界的显式能力限制，不作为升级 Rig 或引入原生 Adapter 的理由。
+Rig 0.42 会暴露 Anthropic 未知语义事件，Adapter 转为 ProviderEvent；原生终端中的 ID、model
+和 stop reason 必须保留。未被 Rig 类型暴露的原始字段仍是 Driver 限制，不复制 SSE 传输层。
 
 Ollama 使用 rig 原生 `/api/chat` Client，默认 endpoint 为 `http://localhost:11434`，允许经过
 通用校验和宿主 `EndpointPolicy` 的显式 HTTP/HTTPS endpoint。Ollama 默认不要求 credential；
@@ -1584,7 +1671,7 @@ Ollama `provider_options` 或请求扩展，避免将 `think`、`keep_alive` 和
 `options.num_predict`；stop 与 seed 显式映射为 `options.stop` 和 `options.seed`。
 
 Ollama 使用保守能力预设：支持 Streaming、System、Tool Calling、并行 ToolCall、JSON Object
-和 JSON Schema；不支持 Developer role，也不声明任何 ToolChoice 变体，因为 rig 0.41 会警告后
+和 JSON Schema；不支持 Developer role，也不声明任何 ToolChoice 变体，因为 rig 会警告后
 忽略该字段。JSON Object 通过最小 object schema 下发；JSON Schema 要求非空 name、object
 schema 和 `strict = true`，name 只作为 Armillae 描述字段，不进入 Ollama wire。模型是否实际
 遵循 schema 或调用 Tool 仍可能因本地模型而异，远端拒绝必须标准化，Adapter 不自动降级。
@@ -1600,22 +1687,21 @@ Ollama thinking 模型返回的 reasoning 同样属于待审计 replay data；Ri
 
 Ollama 非流式响应不提供 response ID，model 必须非空；`done_reason` 映射为标准或 Unknown
 finish reason，评估计数映射为 Usage，受控的 created-at 和 duration 数据进入 metadata。流式
-NDJSON 由 rig 负责跨 HTTP/UTF-8 chunk 重组；ToolCall 在 rig 0.41 中以完整结构化参数事件暴露，
+NDJSON 由 rig 负责跨 HTTP/UTF-8 chunk 重组；ToolCall 在 rig 0.42 中以完整结构化参数事件暴露，
 因此 Adapter 不伪造不存在的字符串 delta。terminal item 已暴露的 `done_reason`、Usage 和安全
-duration metadata 必须进入最终响应；stream model 被 rig 丢弃时保持 `None`。rig 的 Ollama
+duration metadata 必须进入最终响应；stream model 使用原生终端实际值，缺席保持 `None`。rig 的 Ollama
 parser 会忽略未知 JSON 字段且不产生 Unknown item，Adapter 不建立第二套 NDJSON 传输层捕获它们；
 需要原始未知事件的用户应选择能够保留该事实的 Driver。
 
-P5 Streaming 复用相同的 Request Mapper、能力预检和 rig `CompletionModel::stream` 传输边界，
-由 Provider 无关的私有流式状态机将 rig item 转换为 Armillae 事件。五个当前 Provider 使用同一
+P5 Streaming 复用相同的 Request Mapper、能力预检和 rig `raw_stream` 传输边界，
+由 Provider 无关的私有流式状态机将 rig item 转换为 Armillae 事件。七个配置入口使用同一
 Streaming 合约，不为具名 Provider 复制或分叉公共语义。MiniMax 和 Moonshot 仍不接入
 Anthropic-compatible API。
 
-rig 0.41 的公开 OpenAI-compatible stream item 不暴露响应 ID、实际 model 或 finish reason，
-因此流式 `ResponseStarted` 的 `id`/`model` 和最终 `CompletionResponse` 的
-`id`/`model`/`finish_reason` 保持 `None`，不得依据配置、内容或 ToolCall 猜测。终端
-`Final` item 报告的 Usage 必须保留；Reasoning 转为 `ProviderData` 内容和
-`ProviderEvent`，未知 rig stream item 转为 `ProviderEvent`。
+Rig 0.42 原生 OpenAI-compatible 终端中的响应 ID、实际 model、finish reason 与 Usage 必须
+进入最终 CompletionResponse；ResponseStarted 在尚未取得这些事实时保持 None，不依据配置
+补造。Reasoning 转为 ProviderData 内容和 ProviderEvent，未知语义事件转为 ProviderEvent。
+原生终端事实在 Rig 内容聚合前保存，不能使用根据 ToolCall 推断后的完成原因。
 
 ToolCall 增量以 rig 的 `internal_call_id` 作为交错分片关联键，以 Provider 提供的非空 ID 作为
 Armillae `ToolCallId`。名称和参数可以跨任意 item 缓冲，但只有收到 rig 的完整 ToolCall 且
@@ -1663,7 +1749,7 @@ Rig Error                  → Armillae BridgeError
 保留 `call_id`、content 及其顺序，但不把 `is_error` 下发到 Provider。原始 Armillae 请求和
 调用方维护的消息历史仍保留该字段；调用方在 `is_error = true` 时必须通过 ToolResult content
 向模型表达失败事实。Adapter 不自动添加错误前缀或结构，以免改变调用方定义的模型可见内容。
-此行为必须由转换测试覆盖，不能作为未记录的字段丢弃。Anthropic 原生错误标记受 rig 0.41
+此行为必须由转换测试覆盖，不能作为未记录的字段丢弃。Anthropic 原生错误标记受 rig 0.42
 通用类型限制，采用上一节记录的显式拒绝策略，而不是沿用 OpenAI 的省略策略。
 
 ### 9.4 首批 Provider
@@ -1866,7 +1952,7 @@ Rig Adapter 使用 `armillae::llm` target 和 `llm.bridge.call` span 表达上�
 
 本阶段不提供内容级调试开关或宿主脱敏器公共 API。所有发给 rig 的请求继续固定
 `record_telemetry_content = false`，Armillae 自身 span/event 永不记录正文；这是比引入尚无使用
-证据的通用 redactor 更小且更安全的收尾。rig 0.41 的 Ollama 实现在 `rig` DEBUG target 中会输出
+证据的通用 redactor 更小且更安全的收尾。rig 0.42 的 Ollama 实现在 `rig` DEBUG target 中会输出
 原始 NDJSON 行，生产宿主不得启用 `rig`/`rig::completions` 的 DEBUG/TRACE；需要安全的内容级调试
 时应先升级或替换 Driver，并通过新的设计变更引入脱敏契约，不能复用本阶段结构化 tracing 冒充。
 
@@ -1892,7 +1978,7 @@ Spike 使用精确版本 `rig-core = 0.41.0`，结论为通过。离线测试确
 在 Adapter 边界处理。OpenAI 流式路径能够跨任意 HTTP 字节与 UTF-8 边界重组交错的多个
 ToolCall，并保留调用 ID、稳定的内部关联 ID、输出顺序和 Usage。
 
-因此第一阶段继续采用 `rig-core 0.41.0` 实现 `armillae-llm-rig`，暂不转向 `genai` 或原生
+历史第一阶段采用 `rig-core 0.41.0` 实现 `armillae-llm-rig`，暂不转向 `genai` 或原生
 Provider Adapter。Armillae 仍拥有公共协议；Spike 中使用的 Rig 类型、原始响应和内部关联 ID
 都不得穿透 Adapter。依赖继续精确锁定，任何版本升级都必须先复跑转换与 Bridge 合约测试。
 
@@ -1934,12 +2020,12 @@ Bridge 一次只执行一个 Model Call 的边界。完整测试证据和限制�
 - 为 OpenAI、OpenAI-compatible、DeepSeek、MiniMax 和 Moonshot 实现统一的文本、Reasoning、
   ToolCall、Usage 与未知 Provider 语义事件。
 - 完成参数重组、多 ToolCall 交错、中断、唯一完成事件和 drop 取消测试。
-- 保持 rig 0.41 stream 层未暴露的 ID、model 和 finish reason 为缺失值，不进行推断。
+- 按 RFC 0004 保留 Rig 0.42 暴露的原生终端事实，缺席不进行推断。
 
 ### P6：更多 Provider
 
 - Anthropic：使用 rig 原生 Messages Client，完成非流式、流式、Tool Calling、保守能力预检和
-  响应归一化；接受 rig 对原始未知 Anthropic SSE 的过滤边界，不引入自有传输层。
+  响应归一化；保留 Rig 暴露的未知事件，不引入自有传输层。
 - Ollama。
 - 完成统一合约测试和能力矩阵。
 
@@ -2076,3 +2162,9 @@ transport_kind 与 OS error code。不能通过原始文本猜测 DNS/TLS 原因
 
 Mock 合约检查的 BridgeContractError::BridgeFailure 通过 Box<BridgeError> 持有完整错误，
 保持语义不变并限制 Result 错误分支的栈大小。
+
+### Rig 0.42.0 迁移验证
+
+RFC 0004 采用上游修复路线，详见 [0.42 Spike](../spikes/rig-core-0.42.0.md)。历史 0.41 Spike
+保留为当时的证据，不再作为当前版本约束。升级包含全部七个入口、两种结构化模式和
+complete/stream，支持模式真实通过、不支持模式预检拒绝分别验收。Live 仍需凭证和授权。

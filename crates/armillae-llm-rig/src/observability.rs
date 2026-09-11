@@ -218,6 +218,8 @@ fn error_category(error: &BridgeError) -> &'static str {
         BridgeError::InvalidConfiguration { .. } => "invalid_configuration",
         BridgeError::UnsupportedCapability { .. } => "unsupported_capability",
         BridgeError::InvalidRequest { .. } => "invalid_request",
+        BridgeError::InvalidOutputSchema => "invalid_output_schema",
+        BridgeError::StructuredOutput { .. } => "structured_output",
         BridgeError::ProjectionIncompatible { .. } => "projection_incompatible",
         BridgeError::Authentication { .. } => "authentication",
         BridgeError::PermissionDenied { .. } => "permission_denied",

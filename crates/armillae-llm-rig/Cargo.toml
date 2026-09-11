@@ -16,7 +16,7 @@ armillae-core = { version = "0.1.0-alpha.1", path = "../armillae-core" }
 armillae-llm = { version = "0.1.0-alpha.1", path = "../armillae-llm" }
 futures-util = "0.3.34"
 reqwest = { version = "0.13.4", default-features = false }
-rig-core = "=0.41.0"
+rig-core = "=0.42.0"
 secrecy = "0.10"
 serde_json = "1"
 tracing = "0.1"
@@ -24,8 +24,9 @@ tracing = "0.1"
 [dev-dependencies]
 armillae-llm = { path = "../armillae-llm", features = ["mock"] }
 armillae-tools = { path = "../armillae-tools" }
+bytes = "1"
 futures = "0.3"
-rig-core = { version = "=0.41.0", features = ["test-utils"] }
+rig-core = { version = "=0.42.0", features = ["test-utils"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
