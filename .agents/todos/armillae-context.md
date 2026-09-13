@@ -3,7 +3,7 @@
 > 状态：Active；首阶段实现完成（P1–P4）并已通过 DeepSeek 官方 Live 验证（2026-08-28）
 > 最后核对：2026-08-28
 > 需求来源：[Armillae 上下文组织与压缩 Spec](../specs/context.md)
-> 决策来源：[RFC 0004](../rfcs/0004-context.md)
+> 决策来源：[RFC 0005](../rfcs/0005-context.md)
 
 本清单只记录 Active Spec 与当前实现之间的差异，不是独立需求来源。首阶段实现（P1–P4）已
 完成：薄 `Context` 契约、压缩管道三态语义、`SectionContext` 小节范式与 `SectionStore` 契约

@@ -62,10 +62,24 @@ const fn capabilities() -> BridgeCapabilities {
         tool_calling: true,
         parallel_tool_calls: true,
         tool_choice: ToolChoiceCapabilities::all(),
-        output_format: OutputFormatCapabilities::all(),
+        output_format: OutputFormatCapabilities {
+            native_strict_schema: false,
+            ..OutputFormatCapabilities::all()
+        },
         system_message: true,
         developer_message: false,
     }
+}
+
+#[cfg(test)]
+pub(super) fn structured_test_bridge(
+    config: BridgeConfig,
+    credential: Option<SecretString>,
+    client: super::structured_tests::Client,
+) -> Result<Arc<dyn LlmBridge>, BridgeError> {
+    let (config, credential, mapper) =
+        validate_named_config(config, credential, "minimax", "MiniMax")?;
+    create_validated(config, credential, mapper, client)
 }
 
 #[cfg(test)]

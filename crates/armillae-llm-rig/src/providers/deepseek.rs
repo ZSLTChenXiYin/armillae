@@ -76,6 +76,8 @@ const fn capabilities() -> BridgeCapabilities {
         output_format: OutputFormatCapabilities {
             json_object: true,
             json_schema: false,
+            native_strict_schema: false,
+            json_object_schema_validation: true,
         },
         system_message: true,
         developer_message: false,
@@ -141,6 +143,17 @@ fn finish_reason(reason: &str) -> FinishReason {
         "cancelled" => FinishReason::Cancelled,
         other => FinishReason::Unknown(other.to_owned()),
     }
+}
+
+#[cfg(test)]
+pub(super) fn structured_test_bridge(
+    config: BridgeConfig,
+    credential: Option<SecretString>,
+    client: super::structured_tests::Client,
+) -> Result<Arc<dyn LlmBridge>, BridgeError> {
+    let (config, credential, mapper) =
+        validate_named_config(config, credential, "deepseek", "DeepSeek")?;
+    create_validated(config, credential, mapper, client)
 }
 
 #[cfg(test)]

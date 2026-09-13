@@ -1,30 +1,22 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use armillae_llm::{
     BridgeCapabilities, BridgeConfig, BridgeError, LlmBridge, OutputFormatCapabilities,
     ToolChoiceCapabilities,
 };
-use rig_core::{
-    client::CompletionClient,
-    http_client::{HttpClientExt, ReqwestClient},
-    providers::openai,
-};
+use rig_core::{client::CompletionClient, http_client::HttpClientExt, providers::openai};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{RigBridge, request::OpenAiRequestMapper, response::OpenAiResponseNormalizer};
+
+use super::build_http_client;
 
 pub(crate) fn create(
     config: BridgeConfig,
     credential: Option<SecretString>,
 ) -> Result<Arc<dyn LlmBridge>, BridgeError> {
     let (config, credential, request_mapper) = validate_config(config, credential)?;
-    let http_client = ReqwestClient::builder()
-        .connect_timeout(Duration::from_millis(config.transport.connect_timeout_ms))
-        .timeout(Duration::from_millis(config.transport.request_timeout_ms))
-        .build()
-        .map_err(|_| BridgeError::InvalidConfiguration {
-            message: "failed to construct Rig HTTP client".to_owned(),
-        })?;
+    let http_client = build_http_client(&config)?;
 
     create_validated(config, credential, request_mapper, http_client)
 }
@@ -115,6 +107,16 @@ fn invalid_configuration<T>(message: impl Into<String>) -> Result<T, BridgeError
     Err(BridgeError::InvalidConfiguration {
         message: message.into(),
     })
+}
+
+#[cfg(test)]
+pub(super) fn structured_test_bridge(
+    config: BridgeConfig,
+    credential: Option<SecretString>,
+    client: super::structured_tests::Client,
+) -> Result<Arc<dyn LlmBridge>, BridgeError> {
+    let (config, credential, mapper) = validate_config(config, credential)?;
+    create_validated(config, credential, mapper, client)
 }
 
 #[cfg(test)]
@@ -313,8 +315,8 @@ mod tests {
                 ..CompletionRequest::default()
             };
             let expected = CompletionResponse {
-                id: None,
-                model: None,
+                id: Some("tool-stream".into()),
+                model: Some("provider-model".into()),
                 content: vec![
                     AssistantContent::ToolCall(armillae_core::ToolCall {
                         id: ToolCallId::new("call-weather")
@@ -329,7 +331,7 @@ mod tests {
                         arguments: json!({ "sides": 20 }),
                     }),
                 ],
-                finish_reason: None,
+                finish_reason: Some(FinishReason::ToolCall),
                 usage: Some(TokenUsage {
                     input_tokens: Some(7),
                     output_tokens: Some(4),

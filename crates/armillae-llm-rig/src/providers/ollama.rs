@@ -12,10 +12,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     RigBridge,
     request::OllamaRequestMapper,
-    response::{
-        NormalizedResponseFacts, NormalizedStreamingResponseFacts, RigResponseNormalizer,
-        RigStreamingResponseNormalizer,
-    },
+    response::{NormalizedResponseFacts, RigResponseNormalizer},
 };
 
 use super::build_http_client;
@@ -70,14 +67,13 @@ where
         })?;
     let model_name = config.model.clone();
     let model = client.completion_model(config.model);
-    let bridge = RigBridge::new_with_streaming_normalizer(
+    let bridge = RigBridge::new(
         model,
         model_name,
         capabilities(),
         config.defaults,
         Arc::new(request_mapper),
         Arc::new(OllamaResponseNormalizer),
-        Arc::new(OllamaStreamingResponseNormalizer),
     )?;
 
     Ok(Arc::new(bridge))
@@ -150,26 +146,6 @@ impl RigResponseNormalizer<ollama::CompletionResponse> for OllamaResponseNormali
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct OllamaStreamingResponseNormalizer;
-
-impl RigStreamingResponseNormalizer<ollama::StreamingCompletionResponse>
-    for OllamaStreamingResponseNormalizer
-{
-    fn normalize(
-        &self,
-        raw_response: &ollama::StreamingCompletionResponse,
-    ) -> Result<NormalizedStreamingResponseFacts, ()> {
-        Ok(NormalizedStreamingResponseFacts {
-            finish_reason: raw_response
-                .done_reason
-                .as_deref()
-                .map(ollama_finish_reason),
-            provider_metadata: streaming_metadata(raw_response),
-        })
-    }
-}
-
 fn ollama_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "stop" => FinishReason::Stop,
@@ -198,7 +174,7 @@ fn completion_metadata(response: &ollama::CompletionResponse) -> Value {
     Value::Object(metadata)
 }
 
-fn streaming_metadata(response: &ollama::StreamingCompletionResponse) -> Value {
+pub(crate) fn streaming_metadata(response: &ollama::StreamingCompletionResponse) -> Value {
     let mut metadata = Map::new();
     insert_duration_metadata(
         &mut metadata,
@@ -240,6 +216,16 @@ fn invalid_provider_response<T>(message: impl Into<String>) -> Result<T, BridgeE
         message: message.into(),
         metadata: ErrorMetadata::new("ollama"),
     })
+}
+
+#[cfg(test)]
+pub(super) fn structured_test_bridge(
+    config: BridgeConfig,
+    credential: Option<SecretString>,
+    client: super::structured_tests::Client,
+) -> Result<Arc<dyn LlmBridge>, BridgeError> {
+    let (config, credential, mapper) = validate_config(config, credential)?;
+    create_validated(config, credential, mapper, client)
 }
 
 #[cfg(test)]

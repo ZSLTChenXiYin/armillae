@@ -91,6 +91,8 @@ const fn capabilities() -> BridgeCapabilities {
         output_format: OutputFormatCapabilities {
             json_object: false,
             json_schema: true,
+            native_strict_schema: true,
+            json_object_schema_validation: false,
         },
         system_message: true,
         developer_message: false,
@@ -164,6 +166,16 @@ fn invalid_provider_response<T>(message: impl Into<String>) -> Result<T, BridgeE
         message: message.into(),
         metadata: ErrorMetadata::new("anthropic"),
     })
+}
+
+#[cfg(test)]
+pub(super) fn structured_test_bridge(
+    config: BridgeConfig,
+    credential: Option<SecretString>,
+    client: super::structured_tests::Client,
+) -> Result<Arc<dyn LlmBridge>, BridgeError> {
+    let (config, credential, mapper) = validate_config(config, credential)?;
+    create_validated(config, credential, mapper, client)
 }
 
 #[cfg(test)]
@@ -726,10 +738,10 @@ mod tests {
     }
 
     #[test]
-    fn native_text_stream_ignores_rig_filtered_unknown_sse_and_keeps_usage() {
+    fn native_text_stream_preserves_unknown_sse_and_terminal_facts() {
         let events = vec![
             message_start(),
-            json!({ "type": "future_anthropic_event", "value": "ignored-by-rig" }),
+            json!({ "type": "future_anthropic_event", "value": "retained-by-rig" }),
             json!({
                 "type": "content_block_start",
                 "index": 0,
@@ -762,10 +774,10 @@ mod tests {
                 ..CompletionRequest::default()
             };
             let expected = CompletionResponse {
-                id: None,
-                model: None,
+                id: Some("msg-stream".into()),
+                model: Some("claude-test".into()),
                 content: vec![AssistantContent::Text(TextContent::new("你好"))],
-                finish_reason: None,
+                finish_reason: Some(FinishReason::Stop),
                 usage: Some(stream_usage(2)),
                 provider_metadata: json!({}),
             };
@@ -773,7 +785,7 @@ mod tests {
             let observed = verify_stream(bridge.as_ref(), request, &expected)
                 .await
                 .expect("Anthropic text stream must satisfy the shared contract");
-            assert!(!observed.iter().any(|event| matches!(
+            assert!(observed.iter().any(|event| matches!(
                 event,
                 CompletionEvent::ProviderEvent { data }
                     if data.kind == "unknown_stream_item"

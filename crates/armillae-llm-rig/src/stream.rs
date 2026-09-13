@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use armillae_core::{
     AssistantContent, CompletionEvent, CompletionResponse, ContentKind, ProviderData, TextContent,
@@ -10,48 +7,57 @@ use armillae_core::{
 use armillae_llm::{BridgeError, CompletionStream, ErrorMetadata};
 use futures_util::{StreamExt, stream};
 use rig_core::{
-    completion::{CompletionError, GetTokenUsage},
+    completion::CompletionError,
     message::{Reasoning, ToolCall as RigToolCall},
-    streaming::{StreamedAssistantContent, StreamingCompletionResponse, ToolCallDeltaContent},
+    streaming::{
+        RawStreamingResult, StreamFinal, StreamedAssistantContent, StreamingCompletionResponse,
+        ToolCallDeltaContent,
+    },
 };
 use serde_json::{Map, Value, json};
 
-use crate::{convert, response::RigStreamingResponseNormalizer};
+use crate::{convert, driver::Terminal};
 
-#[cfg(test)]
-use crate::response::NoopStreamingResponseNormalizer;
-
-#[cfg(test)]
-pub(crate) fn completion_stream<R>(
-    stream: StreamingCompletionResponse<R>,
+pub(crate) fn completion_stream(
+    stream: RawStreamingResult<Terminal>,
     provider: impl Into<String>,
-) -> CompletionStream
-where
-    R: Clone + Unpin + GetTokenUsage + Send + 'static,
-{
-    completion_stream_with_normalizer(stream, provider, Arc::new(NoopStreamingResponseNormalizer))
-}
-
-pub(crate) fn completion_stream_with_normalizer<R>(
-    stream: StreamingCompletionResponse<R>,
-    provider: impl Into<String>,
-    normalizer: Arc<dyn RigStreamingResponseNormalizer<R>>,
-) -> CompletionStream
-where
-    R: Clone + Unpin + GetTokenUsage + Send + 'static,
-{
-    let state = StreamState::new(stream, provider.into(), normalizer);
+) -> CompletionStream {
+    // The Rig accumulator owns opaque part keys and restores provider-issued tool IDs.
+    // Keep the actual terminal typed, outside its output-based finish-reason inference.
+    let terminal = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let slot = terminal.clone();
+    let provider = provider.into();
+    let stream_provider = provider.clone();
+    let mut ended = false;
+    let stream = stream.map(move |item| {
+        if ended {
+            return Err(CompletionError::ResponseError(
+                "event after terminal".into(),
+            ));
+        }
+        item.and_then(|item| {
+            item.try_map_final(|record| {
+                ended = true;
+                let usage = record.usage;
+                *slot.lock().map_err(|_| {
+                    CompletionError::ResponseError("terminal state unavailable".into())
+                })? = Some(record);
+                Ok(StreamFinal::new(&stream_provider, usage))
+            })
+        })
+    });
+    let stream = StreamingCompletionResponse::stream(&provider, Box::pin(stream));
+    let state = StreamState::new(stream, terminal, provider);
     Box::pin(stream::unfold(state, |mut state| async move {
         state.next_output().await.map(|output| (output, state))
     }))
 }
 
-struct StreamState<R>
-where
-    R: Clone + Unpin + GetTokenUsage,
-{
-    stream: StreamingCompletionResponse<R>,
-    normalizer: Arc<dyn RigStreamingResponseNormalizer<R>>,
+struct StreamState {
+    stream: StreamingCompletionResponse,
+    terminal: std::sync::Arc<std::sync::Mutex<Option<Terminal>>>,
+    response_id: Option<String>,
+    model: Option<String>,
     provider: String,
     pending: VecDeque<CompletionEvent>,
     content: BTreeMap<usize, AssistantContent>,
@@ -68,18 +74,17 @@ where
     failed: bool,
 }
 
-impl<R> StreamState<R>
-where
-    R: Clone + Unpin + GetTokenUsage,
-{
+impl StreamState {
     fn new(
-        stream: StreamingCompletionResponse<R>,
+        stream: StreamingCompletionResponse,
+        terminal: std::sync::Arc<std::sync::Mutex<Option<Terminal>>>,
         provider: String,
-        normalizer: Arc<dyn RigStreamingResponseNormalizer<R>>,
     ) -> Self {
         Self {
             stream,
-            normalizer,
+            terminal,
+            response_id: None,
+            model: None,
             provider,
             pending: VecDeque::from([CompletionEvent::ResponseStarted {
                 id: None,
@@ -125,29 +130,27 @@ where
         }
     }
 
-    fn handle_item(&mut self, item: StreamedAssistantContent<R>) -> Result<(), ()> {
+    fn handle_item(&mut self, item: StreamedAssistantContent) -> Result<(), ()> {
         if self.final_received {
             return Err(());
         }
-
         match item {
             StreamedAssistantContent::Text(text) => {
                 self.close_reasoning()?;
                 self.push_text(text.text);
                 if let Some(value) = text.additional_params {
                     self.pending.push_back(CompletionEvent::ProviderEvent {
-                        data: self.provider_data("text_metadata", value),
+                        data: self.provider_data("text_metadata", value.into_value()),
                     });
                 }
             }
             StreamedAssistantContent::ToolCallDelta {
-                id,
                 internal_call_id,
                 content,
             } => {
                 self.close_text();
                 self.close_reasoning()?;
-                self.push_tool_delta(internal_call_id, id, content)?;
+                self.push_tool_delta(internal_call_id, String::new(), content)?;
             }
             StreamedAssistantContent::ToolCall {
                 tool_call,
@@ -157,30 +160,38 @@ where
                 self.close_reasoning()?;
                 self.complete_tool(internal_call_id, tool_call)?;
             }
-            StreamedAssistantContent::Reasoning(reasoning) => {
+            StreamedAssistantContent::Reasoning { reasoning, .. } => {
                 self.close_text();
                 self.complete_reasoning(reasoning)?;
             }
-            StreamedAssistantContent::ReasoningDelta { id, reasoning } => {
+            StreamedAssistantContent::ReasoningDelta {
+                provider_id,
+                reasoning,
+                ..
+            } => {
                 self.close_text();
-                self.push_reasoning_delta(id, reasoning)?;
+                self.push_reasoning_delta(provider_id, reasoning)?;
             }
-            StreamedAssistantContent::Final(response) => {
+            StreamedAssistantContent::Final(_) => {
+                let record = self.terminal.lock().map_err(|_| ())?.take().ok_or(())?;
                 self.close_text();
                 self.close_reasoning()?;
-                self.usage = convert::usage_from_rig(response.token_usage());
-                let facts = self.normalizer.normalize(&response)?;
-                self.finish_reason = facts.finish_reason;
-                self.provider_metadata = facts.provider_metadata;
+                self.usage = convert::usage_from_rig(record.usage);
+                self.response_id = record.id;
+                self.model = record.model;
+                self.finish_reason = record.finish_reason;
+                self.provider_metadata = Value::Object(record.metadata);
                 self.final_received = true;
             }
             StreamedAssistantContent::Unknown(value) => {
                 self.pending.push_back(CompletionEvent::ProviderEvent {
-                    data: self.provider_data("unknown_stream_item", value),
-                });
+                    data: self.provider_data(
+                        "unknown_stream_item",
+                        serde_json::to_value(value).map_err(|_| ())?,
+                    ),
+                })
             }
         }
-
         Ok(())
     }
 
@@ -250,7 +261,8 @@ where
         let Some(active) = self.active_reasoning.take() else {
             return Ok(());
         };
-        let reasoning = Reasoning::new(&active.text).optional_id(active.id);
+        let mut reasoning = Reasoning::new(&active.text);
+        reasoning.id = active.id;
         let value = serde_json::to_value(reasoning).map_err(|_| ())?;
         self.content.insert(
             active.index,
@@ -312,8 +324,15 @@ where
         tool_call: RigToolCall,
     ) -> Result<(), ()> {
         self.ensure_tool(&internal_call_id);
-        if !tool_call.id.is_empty() {
-            self.observe_tool_id(&internal_call_id, tool_call.id.clone())?;
+        if let Some(identity) = &tool_call.provider {
+            self.observe_tool_id(
+                &internal_call_id,
+                identity
+                    .item_id
+                    .as_ref()
+                    .unwrap_or(&identity.call_id)
+                    .clone(),
+            )?;
         }
         if self
             .tools
@@ -338,7 +357,10 @@ where
             )
         };
         if completed
-            || (!tool_call.id.is_empty() && tool_call.id != id.as_str())
+            || tool_call
+                .provider
+                .as_ref()
+                .is_some_and(|p| p.item_id.as_ref().unwrap_or(&p.call_id) != id.as_str())
             || (!name_fragments.is_empty() && name_fragments != tool_call.function.name)
         {
             return Err(());
@@ -367,7 +389,11 @@ where
         }
 
         let mut metadata = Map::new();
-        if let Some(call_id) = tool_call.call_id {
+        if let Some(call_id) = tool_call
+            .provider
+            .filter(|p| p.item_id.is_some())
+            .map(|p| p.call_id)
+        {
             metadata.insert("call_id".to_owned(), Value::String(call_id));
         }
         if let Some(signature) = tool_call.signature {
@@ -525,8 +551,8 @@ where
         }
         self.pending.push_back(CompletionEvent::ResponseCompleted {
             response: CompletionResponse {
-                id: None,
-                model: None,
+                id: self.response_id.clone(),
+                model: self.model.clone(),
                 content,
                 finish_reason: self.finish_reason.clone(),
                 usage: self.usage.clone(),
@@ -545,6 +571,9 @@ where
         let mut metadata = ErrorMetadata::new(&self.provider);
         if let Some(status) = error.provider_response_status() {
             metadata = metadata.with_http_status(status.as_u16());
+        }
+        if let CompletionError::HttpError(http_error) = &error {
+            crate::response::classify_http_error(http_error, &mut metadata);
         }
         self.interrupted_with_metadata(metadata)
     }
@@ -592,29 +621,27 @@ mod tests {
     use armillae_llm::{BridgeError, mock::contract::validate_stream_events};
     use futures::{Stream, StreamExt, executor::block_on, stream};
     use rig_core::{
-        completion::{CompletionError, GetTokenUsage, Usage},
+        completion::{CompletionError, Usage},
         message::ReasoningContent,
         streaming::{
-            RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse, StreamingResult,
-            ToolCallDeltaContent,
+            RawStreamingChoice, RawStreamingResult, RawStreamingToolCall, ToolCallDeltaContent,
         },
     };
-    use serde::{Deserialize, Serialize};
+
     use serde_json::json;
 
     use super::completion_stream;
 
-    #[derive(Clone, Debug, Deserialize, Serialize)]
-    struct ProbeResponse {
-        usage: Usage,
+    use crate::driver::Terminal;
+    trait FixtureWireId {
+        fn with_wire_id(self, id: &str) -> Self;
     }
-
-    impl GetTokenUsage for ProbeResponse {
-        fn token_usage(&self) -> Usage {
-            self.usage
+    impl FixtureWireId for RawStreamingToolCall {
+        fn with_wire_id(mut self, id: &str) -> Self {
+            self.tool_id = rig_core::streaming::WireId::new(id);
+            self
         }
     }
-
     fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
         ToolCall {
             id: id.try_into().expect("test ToolCall IDs must be non-empty"),
@@ -636,68 +663,67 @@ mod tests {
             let items = vec![
                 Ok(RawStreamingChoice::Message("start".to_owned())),
                 Ok(RawStreamingChoice::ToolCallDelta {
-                    id: "call-weather".to_owned(),
-                    internal_call_id: "weather".to_owned(),
+                    id: "weather".into(),
                     content: ToolCallDeltaContent::Name("get_".to_owned()),
                 }),
                 Ok(RawStreamingChoice::ToolCallDelta {
-                    id: "call-dice".to_owned(),
-                    internal_call_id: "dice".to_owned(),
+                    id: "dice".into(),
                     content: ToolCallDeltaContent::Name("roll_dice".to_owned()),
                 }),
                 Ok(RawStreamingChoice::ToolCallDelta {
-                    id: String::new(),
-                    internal_call_id: "weather".to_owned(),
+                    id: "weather".into(),
                     content: ToolCallDeltaContent::Name("weather".to_owned()),
                 }),
                 Ok(RawStreamingChoice::ToolCallDelta {
-                    id: String::new(),
-                    internal_call_id: "weather".to_owned(),
+                    id: "weather".into(),
                     content: ToolCallDeltaContent::Delta("{\"city\":\"上".to_owned()),
                 }),
                 Ok(RawStreamingChoice::ToolCallDelta {
-                    id: String::new(),
-                    internal_call_id: "dice".to_owned(),
+                    id: "dice".into(),
                     content: ToolCallDeltaContent::Delta("{\"sides\":".to_owned()),
                 }),
                 Ok(RawStreamingChoice::ToolCallDelta {
-                    id: String::new(),
-                    internal_call_id: "weather".to_owned(),
+                    id: "weather".into(),
                     content: ToolCallDeltaContent::Delta("海\"}".to_owned()),
                 }),
                 Ok(RawStreamingChoice::ToolCallDelta {
-                    id: String::new(),
-                    internal_call_id: "dice".to_owned(),
+                    id: "dice".into(),
                     content: ToolCallDeltaContent::Delta("20}".to_owned()),
                 }),
                 Ok(RawStreamingChoice::ToolCall(
                     RawStreamingToolCall::new(
-                        "call-weather".to_owned(),
+                        "weather".to_owned(),
                         "get_weather".to_owned(),
                         json!({ "city": "上海" }),
                     )
-                    .with_internal_call_id("weather".to_owned()),
+                    .with_wire_id("call-weather"),
                 )),
                 Ok(RawStreamingChoice::ToolCall(
                     RawStreamingToolCall::new(
-                        "call-dice".to_owned(),
+                        "dice".to_owned(),
                         "roll_dice".to_owned(),
                         json!({ "sides": 20 }),
                     )
-                    .with_internal_call_id("dice".to_owned()),
+                    .with_wire_id("call-dice"),
                 )),
                 Ok(RawStreamingChoice::ReasoningDelta {
-                    id: Some("reasoning-1".to_owned()),
+                    id: "reasoning-1".into(),
+                    provider_id: rig_core::streaming::WireId::new("reasoning-1"),
                     reasoning: "checking".to_owned(),
                 }),
-                Ok(RawStreamingChoice::Unknown(json!({
-                    "type": "provider.extension"
-                }))),
-                Ok(RawStreamingChoice::FinalResponse(ProbeResponse { usage })),
+                Ok(RawStreamingChoice::Unknown(
+                    json!({
+                        "type": "provider.extension"
+                    })
+                    .into(),
+                )),
+                Ok(RawStreamingChoice::FinalResponse(Terminal {
+                    usage,
+                    ..Terminal::default()
+                })),
             ];
-            let inner: StreamingResult<ProbeResponse> = Box::pin(stream::iter(items));
-            let mut stream =
-                completion_stream(StreamingCompletionResponse::stream(inner), "deepseek");
+            let inner: RawStreamingResult<Terminal> = Box::pin(stream::iter(items));
+            let mut stream = completion_stream(inner, "deepseek");
             let mut events = Vec::new();
             while let Some(event) = stream.next().await {
                 events.push(event.expect("valid stream items must convert"));
@@ -767,27 +793,27 @@ mod tests {
         block_on(async {
             let items = vec![
                 Ok(RawStreamingChoice::ReasoningDelta {
-                    id: None,
+                    id: "reasoning".into(),
+                    provider_id: None,
                     reasoning: "思".to_owned(),
                 }),
                 Ok(RawStreamingChoice::ReasoningDelta {
-                    id: None,
+                    id: "reasoning".into(),
+                    provider_id: None,
                     reasoning: "考".to_owned(),
                 }),
                 Ok(RawStreamingChoice::Reasoning {
-                    id: None,
+                    id: "reasoning".into(),
+                    provider_id: None,
                     content: ReasoningContent::Text {
                         text: "思考".to_owned(),
                         signature: Some("signed".to_owned()),
                     },
                 }),
-                Ok(RawStreamingChoice::FinalResponse(ProbeResponse {
-                    usage: Usage::default(),
-                })),
+                Ok(RawStreamingChoice::FinalResponse(Terminal::default())),
             ];
-            let inner: StreamingResult<ProbeResponse> = Box::pin(stream::iter(items));
-            let mut stream =
-                completion_stream(StreamingCompletionResponse::stream(inner), "anthropic");
+            let inner: RawStreamingResult<Terminal> = Box::pin(stream::iter(items));
+            let mut stream = completion_stream(inner, "anthropic");
             let mut events = Vec::new();
             while let Some(event) = stream.next().await {
                 events.push(event.expect("Anthropic reasoning stream must remain valid"));
@@ -812,25 +838,22 @@ mod tests {
         block_on(async {
             let items = vec![
                 Ok(RawStreamingChoice::ReasoningDelta {
-                    id: None,
+                    id: "reasoning".into(),
+                    provider_id: None,
                     reasoning: String::new(),
                 }),
                 Ok(RawStreamingChoice::Reasoning {
-                    id: None,
+                    id: "reasoning".into(),
+                    provider_id: None,
                     content: ReasoningContent::Text {
                         text: String::new(),
                         signature: None,
                     },
                 }),
-                Ok(RawStreamingChoice::FinalResponse(ProbeResponse {
-                    usage: Usage::default(),
-                })),
+                Ok(RawStreamingChoice::FinalResponse(Terminal::default())),
             ];
-            let inner: StreamingResult<ProbeResponse> = Box::pin(stream::iter(items));
-            let mut stream = completion_stream(
-                StreamingCompletionResponse::stream(inner),
-                "openai-compatible",
-            );
+            let inner: RawStreamingResult<Terminal> = Box::pin(stream::iter(items));
+            let mut stream = completion_stream(inner, "openai-compatible");
             let mut events = Vec::new();
             while let Some(event) = stream.next().await {
                 events.push(event.expect("empty reasoning stream must remain valid"));
@@ -859,19 +882,17 @@ mod tests {
         block_on(async {
             let items = vec![
                 Ok(RawStreamingChoice::Reasoning {
-                    id: None,
+                    id: "reasoning".into(),
+                    provider_id: None,
                     content: ReasoningContent::Text {
                         text: String::new(),
                         signature: Some("signed-empty-thinking".to_owned()),
                     },
                 }),
-                Ok(RawStreamingChoice::FinalResponse(ProbeResponse {
-                    usage: Usage::default(),
-                })),
+                Ok(RawStreamingChoice::FinalResponse(Terminal::default())),
             ];
-            let inner: StreamingResult<ProbeResponse> = Box::pin(stream::iter(items));
-            let mut stream =
-                completion_stream(StreamingCompletionResponse::stream(inner), "anthropic");
+            let inner: RawStreamingResult<Terminal> = Box::pin(stream::iter(items));
+            let mut stream = completion_stream(inner, "anthropic");
             let mut events = Vec::new();
             while let Some(event) = stream.next().await {
                 events.push(event.expect("signed empty reasoning stream must remain valid"));
@@ -894,7 +915,7 @@ mod tests {
     #[test]
     fn errors_missing_final_and_incomplete_tools_interrupt_without_completion() {
         block_on(async {
-            let cases: Vec<StreamingResult<ProbeResponse>> = vec![
+            let cases: Vec<RawStreamingResult<Terminal>> = vec![
                 Box::pin(stream::iter(vec![Err(CompletionError::ProviderError(
                     "sensitive provider failure".to_owned(),
                 ))])),
@@ -903,37 +924,27 @@ mod tests {
                 ))])),
                 Box::pin(stream::iter(vec![
                     Ok(RawStreamingChoice::ToolCallDelta {
-                        id: "call-incomplete".to_owned(),
-                        internal_call_id: "incomplete".to_owned(),
+                        id: "incomplete".into(),
                         content: ToolCallDeltaContent::Delta("{\"x\":".to_owned()),
                     }),
-                    Ok(RawStreamingChoice::FinalResponse(ProbeResponse {
-                        usage: Usage::default(),
-                    })),
+                    Ok(RawStreamingChoice::FinalResponse(Terminal::default())),
                 ])),
                 Box::pin(stream::iter(vec![
                     Ok(RawStreamingChoice::ToolCallDelta {
-                        id: "call-invalid".to_owned(),
-                        internal_call_id: "invalid".to_owned(),
+                        id: "invalid".into(),
                         content: ToolCallDeltaContent::Delta("{not-json".to_owned()),
                     }),
-                    Ok(RawStreamingChoice::ToolCall(
-                        RawStreamingToolCall::new(
-                            "call-invalid".to_owned(),
-                            "invalid".to_owned(),
-                            json!({}),
-                        )
-                        .with_internal_call_id("invalid".to_owned()),
-                    )),
-                    Ok(RawStreamingChoice::FinalResponse(ProbeResponse {
-                        usage: Usage::default(),
-                    })),
+                    Ok(RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+                        "invalid".to_owned(),
+                        "invalid".to_owned(),
+                        json!({}),
+                    ))),
+                    Ok(RawStreamingChoice::FinalResponse(Terminal::default())),
                 ])),
             ];
 
             for inner in cases {
-                let mut stream =
-                    completion_stream(StreamingCompletionResponse::stream(inner), "openai");
+                let mut stream = completion_stream(inner, "openai");
                 let mut completed = false;
                 let mut interrupted = 0;
                 while let Some(item) = stream.next().await {
@@ -960,7 +971,7 @@ mod tests {
     }
 
     impl Stream for DropAwareStream {
-        type Item = Result<RawStreamingChoice<ProbeResponse>, CompletionError>;
+        type Item = Result<RawStreamingChoice<Terminal>, CompletionError>;
 
         fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             Poll::Pending
@@ -976,16 +987,71 @@ mod tests {
     #[test]
     fn dropping_armillae_stream_drops_the_rig_provider_stream() {
         let dropped = Arc::new(AtomicBool::new(false));
-        let inner: StreamingResult<ProbeResponse> = Box::pin(DropAwareStream {
+        let inner: RawStreamingResult<Terminal> = Box::pin(DropAwareStream {
             dropped: dropped.clone(),
         });
-        let stream = completion_stream(
-            StreamingCompletionResponse::stream(inner),
-            "openai-compatible",
-        );
+        let stream = completion_stream(inner, "openai-compatible");
 
         drop(stream);
 
         assert!(dropped.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use futures_util::stream;
+    use rig_core::streaming::{RawStreamingChoice, RawStreamingToolCall};
+
+    #[test]
+    fn native_stop_is_not_inferred_from_tools_and_terminal_is_unique() {
+        futures::executor::block_on(async {
+            for extra in [
+                None,
+                Some(RawStreamingChoice::FinalResponse(Terminal::default())),
+                Some(RawStreamingChoice::Message("late".into())),
+            ] {
+                let mut items = vec![
+                    Ok(RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+                        "provider-call",
+                        "lookup".into(),
+                        json!({}),
+                    ))),
+                    Ok(RawStreamingChoice::FinalResponse(Terminal {
+                        finish_reason: Some(armillae_core::FinishReason::Stop),
+                        ..Terminal::default()
+                    })),
+                ];
+                let malformed = extra.is_some();
+                if let Some(item) = extra {
+                    items.push(Ok(item));
+                }
+                let events = completion_stream(Box::pin(stream::iter(items)), "openai")
+                    .collect::<Vec<_>>()
+                    .await;
+                let responses = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        Ok(CompletionEvent::ResponseCompleted { response }) => Some(response),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if malformed {
+                    assert!(responses.is_empty());
+                    assert_eq!(events.iter().filter(|e| e.is_err()).count(), 1);
+                } else {
+                    assert_eq!(responses.len(), 1);
+                    assert_eq!(
+                        responses[0].finish_reason,
+                        Some(armillae_core::FinishReason::Stop)
+                    );
+                    assert_eq!(
+                        responses[0].tool_calls().next().unwrap().id.as_str(),
+                        "provider-call"
+                    );
+                }
+            }
+        });
     }
 }

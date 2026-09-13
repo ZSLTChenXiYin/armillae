@@ -87,6 +87,11 @@ impl ErrorMetadata {
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BridgeError {
+    #[error("invalid structured output schema")]
+    InvalidOutputSchema,
+
+    #[error("structured output validation failed: {kind}")]
+    StructuredOutput { kind: StructuredOutputErrorKind },
     #[error("invalid bridge configuration: {message}")]
     InvalidConfiguration { message: String },
 
@@ -168,4 +173,22 @@ mod diagnostic_tests {
             );
         }
     }
+}
+
+/// Content-free failure facts; never includes schema or generated values.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StructuredOutputErrorKind {
+    #[error("response did not finish normally")]
+    Incomplete,
+    #[error("response contains a tool call")]
+    ToolCall,
+    #[error("response contains no JSON text")]
+    MissingText,
+    #[error("response is not valid JSON")]
+    InvalidJson,
+    #[error("response is not a JSON object")]
+    NotObject,
+    #[error("response does not match the schema")]
+    SchemaMismatch,
 }

@@ -4,7 +4,7 @@
 > 规范基线：2026-08-28
 > 适用范围：`armillae-context` crate（首阶段已实现并 Live 验证通过）
 > 设计入口：[Armillae 设计索引](../DESIGN.md)
-> 决策来源：[RFC 0004：Armillae 上下文组织与压缩](../rfcs/0004-context.md)
+> 决策来源：[RFC 0005：Armillae 上下文组织与压缩](../rfcs/0005-context.md)
 > 实施清单：[todos/armillae-context.md](../todos/armillae-context.md)
 
 本文是 `armillae-context` 子系统的实施依据。它冻结薄 `Context` 契约（只生产可推理的

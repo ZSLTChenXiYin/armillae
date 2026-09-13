@@ -1,7 +1,7 @@
 # Armillae 设计索引
 
 > 状态：Active
-> 更新日期：2026-08-28
+> 更新日期：2026-09-11
 > 作用：Armillae 生态的权威工程设计入口，不在本文件重复各子系统规范或 RFC
 
 本目录服务于项目设计、实施和 Agent 协作；工程事实按成熟度分为已生效的 `specs/`、尚在决策
@@ -17,7 +17,7 @@ Armillae 面向 Agentic 叙事、TRPG 运行时和大世界游戏引擎提供分
 
 模拟推进、Clock、可替换 ECS 后端和 Module 边界已经由 RFC 0002 收敛，并转入
 `armillae-simulate` Active Spec；具体持久化模型及其 RFC 暂缓，不属于 `armillae-simulate` 的
-实现责任。上下文组织与压缩已接受 RFC 0004：`armillae-context` 以薄 `Context` 契约 + 范式黑盒
+实现责任。上下文组织与压缩已接受 RFC 0005：`armillae-context` 以薄 `Context` 契约 + 范式黑盒
 实现，只依赖 `armillae-core`，当前内置 `SectionContext` 小节范式；v1 导出不含缓存断点，
 `TraditionalContext` 为后续范围。LLM Bridge 第一阶段离线基线已经完成；真实 DeepSeek 多轮
 验证暴露出 ProviderData 只有响应保留、没有请求回放的非对称边界。用户于 2026-08-27 接受
@@ -43,7 +43,7 @@ Agentic 叙事运行时                 Discovery
   │     ├── armillae-simulate       后端中立的执行、Clock 与 Module 契约
   │     └── armillae-simulate-bevy  首个 ECS 后端适配
   ├── 组合：状态与持久化            RFC 暂缓；独立于 simulate
-  ├── 组合：上下文组织与压缩        RFC 0004 Accepted；Spec Active，首阶段实现完成 + Live 验证通过
+  ├── 组合：上下文组织与压缩        RFC 0005 Accepted；Spec Active，首阶段实现完成 + Live 验证通过
   │     └── armillae-context       薄 Context 契约 + 范式黑盒；只依赖 core
   ├── 可选：LlmRouter              RFC 0003 Accepted；组合多个 LlmBridge
   │     └── LlmBridge              一次 Provider Model Call；canonical 协议投影
@@ -69,14 +69,23 @@ attempt，但不执行 Tool、不维护 Conversation Memory，也不改变 canon
 | [RFC 0001：Agentic 叙事运行时](rfcs/0001-agentic-runtime.md) | Draft RFC | 运行时目标、分层边界、待冻结的领域模型与设计工作流 |
 | [RFC 0002：Simulate 与可替换 ECS 后端](rfcs/0002-simulate.md) | Accepted RFC | Simulate 命名、责任、推进所有权、Clock、Module 与可替换后端决策 |
 | [RFC 0003：LLM canonical 投影与模型 fallback](rfcs/0003-llm-projection-fallback.md) | Accepted RFC | Provider 双向投影、兼容性事实、候选路由与 fallback 边界 |
-| [RFC 0004：上下文组织与压缩](rfcs/0004-context.md) | Accepted RFC | 薄 Context 契约 + 范式黑盒实现、压缩执行外包、持久化归范式、窗口分区决策 |
-| [rig-core 0.41.0 Spike](spikes/rig-core-0.41.0.md) | Completed Spike | Rig 低层可行性证据、限制与锁定版本依据 |
+| [RFC 0004：Rig 流式完成事实校验](rfcs/0004-stream-terminal-evidence.md) | Accepted RFC | Rig 0.42.0 原生 typed Driver 与全 Provider 迁移门禁 |
+| [RFC 0005：上下文组织与压缩](rfcs/0005-context.md) | Accepted RFC | 薄 Context 契约 + 范式黑盒实现、压缩执行外包、持久化归范式、窗口分区决策 |
+| [rig-core 0.41.0 Spike](spikes/rig-core-0.41.0.md) | Historical Spike | 初期低层可行性证据 |
+| [rig-core 0.42.0 Spike](spikes/rig-core-0.42.0.md) | Completed Offline Spike | 当前精确版本、全 Provider 迁移与终端事实验证 |
 
 实现前必须先在本索引中找到对应的 Active Spec 或已接受 RFC，再从 [TODO 索引](TODO.md)
 定位实施清单。跨子系统变更先更新本入口中的依赖和责任边界，再更新相关 Spec 或 RFC，最后
 更新实现差异清单与代码。Draft RFC 不构成实现授权。
 
 ## 4. 当前工作顺序
+
+结构化结果按 LLM Bridge Spec 7.2.1 的显式模式推进：服务端原生严格 Schema 与 JSON Object
+加客户端 Schema 校验不得互换。范围包含全部七个 Provider 配置入口以及 complete/stream；
+校验属于单次调用结果边界，不引入自动修复、重试或新的运行时层。离线矩阵与授权 Live 门禁
+分别记录，不能以部分 Provider 或仅非流式通过宣称全量完成。
+2026-09-11 回归发现 Rig 在缺少 Provider 完成标记的 EOF 后也可能生成 FinalResponse；该缺陷
+阻止完整流式验收。用户已接受 RFC 0004 的 Rig 0.42.0 升级路线；不能根据合法 JSON 或 Usage 猜测完成。
 
 1. 按 RFC 0003 和 LLM Bridge Active Spec 先完成所有已支持 Adapter 的直接 Bridge Provider
    projection：同 Provider 回放已知私有数据，跨 Provider 只生成目标 wire projection，不修改
@@ -100,13 +109,13 @@ attempt，但不执行 Tool、不维护 Conversation Memory，也不改变 canon
 7. 状态与持久化继续作为独立子系统保留，但在用户重新启动该方向前不创建 RFC、Spec、crate
    或持久化 Schema。
 8. 冻结运行时与 LLM/Tool 等可选能力的依赖边界及端到端验收标准。
-9. armillae-context 首阶段实现完成（RFC 0004 + Active Spec 冻结后落地 P1–P4、集成示例与
+9. armillae-context 首阶段实现完成（RFC 0005 + Active Spec 冻结后落地 P1–P4、集成示例与
    生产级内存 Store），并已通过 DeepSeek 官方 API 的 Live 链路验证（对话 → record_section
    划界 → 自动压缩 → prepare 零组装 → 真实推理 → apply → export）；v1 导出不含缓存断点，
    TraditionalContext 为后续第二个内置范式。Live 验证同时发现并修复了 prepare 产物未剥离
    record_section 痕迹导致未配对 tool_calls 的问题（Spec §7.1.0 已同步）。
 
-Anthropic 与 Ollama 继续使用精确锁定的 Rig 0.41.0 和既有 Bridge 合约，不为 Rig 已过滤的原始
+所有七个 Provider 入口统一迁移到精确锁定的 Rig 0.42.0 和既有 Bridge 合约，不为 Rig 已过滤的原始
 未知 SSE/NDJSON 数据引入自有传输层；Driver 未暴露的事实作为显式兼容限制记录。
 
 ## 5. 变更规则

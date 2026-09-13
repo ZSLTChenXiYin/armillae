@@ -2,10 +2,7 @@ use armillae_core::{
     AssistantContent, CompletionResponse as ArmillaeCompletionResponse, FinishReason,
 };
 use armillae_llm::{BridgeError, ErrorMetadata, TransportErrorKind};
-use rig_core::{
-    completion::{CompletionError, CompletionResponse as RigCompletionResponse},
-    providers::openai,
-};
+use rig_core::{completion::CompletionError, providers::openai};
 use serde_json::{Map, Value};
 
 use crate::convert;
@@ -32,28 +29,6 @@ pub(crate) trait RigResponseNormalizer<R>: Send + Sync {
 
     fn normalize_error(&self, error: CompletionError) -> BridgeError {
         normalize_completion_error(self.provider(), error)
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct NormalizedStreamingResponseFacts {
-    pub(crate) finish_reason: Option<FinishReason>,
-    pub(crate) provider_metadata: Value,
-}
-
-pub(crate) trait RigStreamingResponseNormalizer<R>: Send + Sync {
-    fn normalize(&self, raw_response: &R) -> Result<NormalizedStreamingResponseFacts, ()>;
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct NoopStreamingResponseNormalizer;
-
-impl<R> RigStreamingResponseNormalizer<R> for NoopStreamingResponseNormalizer {
-    fn normalize(&self, _raw_response: &R) -> Result<NormalizedStreamingResponseFacts, ()> {
-        Ok(NormalizedStreamingResponseFacts {
-            finish_reason: None,
-            provider_metadata: Value::Object(Map::new()),
-        })
     }
 }
 
@@ -111,11 +86,14 @@ impl RigResponseNormalizer<openai::completion::CompletionResponse> for OpenAiRes
     }
 }
 
-pub(crate) fn response_from_rig<R>(
-    response: RigCompletionResponse<R>,
+pub(crate) fn response_from_rig<R: crate::driver::NativeResponse>(
+    response: R,
     normalizer: &dyn RigResponseNormalizer<R>,
 ) -> Result<ArmillaeCompletionResponse, BridgeError> {
-    let facts = normalizer.normalize(&response.raw_response)?;
+    let facts = normalizer.normalize(&response)?;
+    let response = response
+        .normalize_native(normalizer.provider())
+        .map_err(|e| normalizer.normalize_error(e))?;
     let content = convert::assistant_content_from_rig(response.choice, normalizer.provider())?;
     let content = normalizer.normalize_content(content)?;
 
@@ -129,7 +107,7 @@ pub(crate) fn response_from_rig<R>(
     })
 }
 
-fn openai_finish_reason(reason: &str) -> FinishReason {
+pub(crate) fn openai_finish_reason(reason: &str) -> FinishReason {
     match reason {
         "stop" => FinishReason::Stop,
         "length" | "max_tokens" => FinishReason::Length,
@@ -205,18 +183,19 @@ fn normalize_completion_error(provider: &str, error: CompletionError) -> BridgeE
                     metadata: metadata(),
                 }
             }
-            _ => BridgeError::Transport {
-                retryable: false,
-                metadata: metadata(),
-            },
         },
     }
 }
 
-fn classify_http_error(error: &rig_core::http_client::Error, metadata: &mut ErrorMetadata) {
+pub(crate) fn classify_http_error(
+    error: &rig_core::http_client::Error,
+    metadata: &mut ErrorMetadata,
+) {
     use rig_core::http_client::Error;
     match error {
-        Error::InvalidStatusCode(status) | Error::InvalidStatusCodeWithMessage(status, _) => {
+        Error::InvalidStatusCode(status)
+        | Error::InvalidStatusCodeWithMessage(status, _)
+        | Error::InvalidStatusCodeWithDetails { status, .. } => {
             metadata.http_status = Some(status.as_u16());
         }
         Error::Instance(source) => {
@@ -301,11 +280,7 @@ fn invalid_provider_response<T>(
 mod tests {
     use armillae_core::{AssistantContent, FinishReason};
     use armillae_llm::{BridgeError, ErrorMetadata};
-    use rig_core::{
-        OneOrMany,
-        completion::{CompletionError, CompletionResponse as RigCompletionResponse, Usage},
-        providers::openai,
-    };
+    use rig_core::{completion::CompletionError, providers::openai};
     use serde_json::json;
 
     use super::{OpenAiResponseNormalizer, RigResponseNormalizer, response_from_rig};
@@ -337,18 +312,13 @@ mod tests {
 
     #[test]
     fn openai_normalizer_uses_raw_response_facts() {
-        let response = RigCompletionResponse {
-            choice: OneOrMany::one(rig_core::message::AssistantContent::text("hello")),
-            usage: Usage {
-                input_tokens: 3,
-                output_tokens: 2,
-                total_tokens: 5,
-                cached_input_tokens: 1,
-                ..Usage::default()
-            },
-            raw_response: raw_response("tool_calls"),
-            message_id: None,
-        };
+        let mut response = raw_response("tool_calls");
+        response
+            .usage
+            .as_mut()
+            .expect("fixture usage")
+            .prompt_tokens_details =
+            Some(serde_json::from_value(json!({"cached_tokens":1})).expect("usage details"));
 
         let normalized = response_from_rig(response, &OpenAiResponseNormalizer::new("openai"))
             .expect("valid OpenAI response must normalize");
@@ -390,6 +360,27 @@ mod tests {
             OpenAiResponseNormalizer::new("openai").normalize(&raw),
             Err(BridgeError::InvalidProviderResponse { .. })
         ));
+    }
+
+    #[test]
+    fn rig_042_detailed_http_failure_preserves_status_without_payload() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-private", "secret-header".parse().unwrap());
+        let error =
+            OpenAiResponseNormalizer::new("openai").normalize_error(CompletionError::HttpError(
+                rig_core::http_client::Error::InvalidStatusCodeWithDetails {
+                    status: reqwest::StatusCode::FORBIDDEN,
+                    body: "secret-body".into(),
+                    headers: Box::new(headers),
+                },
+            ));
+        assert!(
+            matches!(&error, BridgeError::PermissionDenied { metadata } if metadata.http_status == Some(403))
+        );
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains("secret-body"));
+            assert!(!rendered.contains("secret-header"));
+        }
     }
 
     #[test]

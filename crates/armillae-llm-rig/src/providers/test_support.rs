@@ -114,12 +114,12 @@ pub(super) fn streaming_client(events: Vec<Value>) -> SequencedStreamingHttpClie
 
 pub(super) fn expected_text_stream() -> armillae_core::CompletionResponse {
     armillae_core::CompletionResponse {
-        id: None,
-        model: None,
+        id: Some("stream-test".into()),
+        model: Some("provider-model".into()),
         content: vec![armillae_core::AssistantContent::Text(
             armillae_core::TextContent::new("你好"),
         )],
-        finish_reason: None,
+        finish_reason: Some(armillae_core::FinishReason::Stop),
         usage: Some(armillae_core::TokenUsage {
             input_tokens: Some(3),
             output_tokens: Some(2),

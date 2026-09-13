@@ -8,7 +8,7 @@ mod usage;
 
 pub use completion::{
     AssistantContent, CompletionRequest, CompletionResponse, FinishReason, GenerationOptions,
-    OutputFormat, ProviderData, ProviderExtensions,
+    OutputFormat, ProviderData, ProviderExtensions, StructuredOutputMode,
 };
 pub use message::{ContentPart, Message, Role, TextContent};
 pub use stream::{CompletionEvent, ContentKind};

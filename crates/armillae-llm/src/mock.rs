@@ -240,6 +240,7 @@ impl LlmBridge for MockBridge {
 
     fn project(&self, request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
         self.capabilities.validate_request(request)?;
+        crate::OutputValidation::prepare(request.output_format.as_ref())?;
         Ok(ProjectionReport::exact("mock"))
     }
 
@@ -250,8 +251,12 @@ impl LlmBridge for MockBridge {
         Box::pin(async move {
             self.record_request(&request)?;
             self.capabilities.validate_request(&request)?;
+            let validation = crate::OutputValidation::prepare(request.output_format.as_ref())?;
             match self.next_response()? {
-                MockResponse::Completion(response) => Ok(response),
+                MockResponse::Completion(response) => {
+                    validation.validate(&response)?;
+                    Ok(response)
+                }
                 MockResponse::Error(error) => Err(error),
                 MockResponse::Stream(_) => Err(BridgeError::InvalidRequest {
                     message: "MockBridge complete call received a Stream script item".to_owned(),
@@ -267,9 +272,10 @@ impl LlmBridge for MockBridge {
         Box::pin(async move {
             self.record_request(&request)?;
             self.capabilities.validate_streaming_request(&request)?;
+            let validation = crate::OutputValidation::prepare(request.output_format.as_ref())?;
             match self.next_response()? {
                 MockResponse::Stream(events) => {
-                    Ok(Box::pin(stream::iter(events)) as CompletionStream)
+                    Ok(validation.stream(Box::pin(stream::iter(events)), "mock"))
                 }
                 MockResponse::Error(error) => Err(error),
                 MockResponse::Completion(_) => Err(BridgeError::InvalidRequest {

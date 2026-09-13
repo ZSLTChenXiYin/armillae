@@ -1,4 +1,4 @@
-# RFC 0004：Armillae 上下文组织与压缩（armillae-context）
+# RFC 0005：Armillae 上下文组织与压缩（armillae-context）
 
 > 状态：Accepted
 > 接受日期：2026-08-26

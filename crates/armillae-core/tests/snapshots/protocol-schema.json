@@ -509,31 +509,30 @@
       "description": "A requested output representation.",
       "oneOf": [
         {
-          "type": "object",
           "properties": {
             "type": {
-              "type": "string",
-              "const": "text"
+              "const": "text",
+              "type": "string"
             }
           },
           "required": [
             "type"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
             "type": {
-              "type": "string",
-              "const": "json_object"
+              "const": "json_object",
+              "type": "string"
             }
           },
           "required": [
             "type"
-          ]
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
           "properties": {
             "name": {
               "type": "string"
@@ -543,8 +542,8 @@
               "type": "boolean"
             },
             "type": {
-              "type": "string",
-              "const": "json_schema"
+              "const": "json_schema",
+              "type": "string"
             }
           },
           "required": [
@@ -552,7 +551,32 @@
             "name",
             "schema",
             "strict"
-          ]
+          ],
+          "type": "object",
+          "description": "Legacy wire-format request without Bridge-side result validation.\nUse `Structured` to require an explicit enforcement mode and validation."
+        },
+        {
+          "description": "An explicit enforcement mode with final client-side validation.",
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/StructuredOutputMode"
+            },
+            "name": {
+              "type": "string"
+            },
+            "schema": true,
+            "type": {
+              "const": "structured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "schema",
+            "mode"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -801,6 +825,21 @@
             "type",
             "value"
           ]
+        }
+      ]
+    },
+    "StructuredOutputMode": {
+      "description": "Where a structured response's schema is enforced during generation.",
+      "oneOf": [
+        {
+          "const": "native_strict",
+          "description": "The Provider must constrain generation using the supplied schema.",
+          "type": "string"
+        },
+        {
+          "const": "json_object_validated",
+          "description": "The Provider generates JSON; the Bridge validates the result locally.",
+          "type": "string"
         }
       ]
     }

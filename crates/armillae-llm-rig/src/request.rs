@@ -1,6 +1,6 @@
 use armillae_core::{
     CompletionRequest as ArmillaeCompletionRequest, ContentPart, GenerationOptions, OutputFormat,
-    Role, ToolCallId,
+    Role,
 };
 use armillae_llm::{BridgeError, ProjectionReport};
 use rig_core::completion::CompletionRequest as RigCompletionRequest;
@@ -19,6 +19,89 @@ pub(crate) trait RigRequestMapper: Send + Sync {
         request: ArmillaeCompletionRequest,
         defaults: &GenerationOptions,
     ) -> Result<RigRequestProjection, BridgeError>;
+}
+
+/// The conservative native subset must not rely on client validation to enforce
+/// constraints that a Provider's constrained decoder might silently ignore.
+pub(crate) fn validate_native_structured_schema(schema: &Value) -> Result<(), BridgeError> {
+    fn unsupported<T>() -> Result<T, BridgeError> {
+        Err(BridgeError::UnsupportedCapability {
+            capability: "output_format.native_strict_schema.schema_subset".to_owned(),
+        })
+    }
+    fn visit(schema: &Value) -> Result<(), BridgeError> {
+        let Some(object) = schema.as_object() else {
+            return unsupported();
+        };
+        for (key, value) in object {
+            match key.as_str() {
+                "type" | "enum" | "required" | "title" | "description" | "$schema" => {}
+                "additionalProperties" if *value == Value::Bool(false) => {}
+                "$ref"
+                    if value
+                        .as_str()
+                        .is_some_and(|reference| reference.starts_with("#/")) => {}
+                "properties" | "$defs" => {
+                    let Some(children) = value.as_object() else {
+                        return unsupported();
+                    };
+                    for child in children.values() {
+                        visit(child)?;
+                    }
+                }
+                "items" => visit(value)?,
+                "anyOf" => {
+                    let Some(children) = value.as_array() else {
+                        return unsupported();
+                    };
+                    for child in children {
+                        visit(child)?;
+                    }
+                }
+                _ => return unsupported(),
+            }
+        }
+        let has_type = |name| match object.get("type") {
+            Some(Value::String(value)) => value == name,
+            Some(Value::Array(values)) => values.iter().any(|value| value.as_str() == Some(name)),
+            _ => false,
+        };
+        if object.contains_key("properties") && !has_type("object") {
+            return unsupported();
+        }
+        if has_type("object") {
+            if object.get("additionalProperties") != Some(&Value::Bool(false)) {
+                return unsupported();
+            }
+            let (Some(properties), Some(required)) = (
+                object.get("properties").and_then(Value::as_object),
+                object.get("required").and_then(Value::as_array),
+            ) else {
+                return unsupported();
+            };
+            if required.len() != properties.len()
+                || !properties
+                    .keys()
+                    .all(|key| required.contains(&Value::String(key.clone())))
+            {
+                return unsupported();
+            }
+        }
+        if has_type("array") && !object.contains_key("items") {
+            return unsupported();
+        }
+        if !object.contains_key("type")
+            && !object.contains_key("$ref")
+            && !object.contains_key("anyOf")
+        {
+            return unsupported();
+        }
+        Ok(())
+    }
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return unsupported();
+    }
+    visit(schema)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -100,7 +183,7 @@ fn validate_anthropic_messages(request: &ArmillaeCompletionRequest) -> Result<()
         for content in &message.content {
             if matches!(content, ContentPart::ToolResult(result) if result.is_error) {
                 return invalid_request(
-                    "Rig 0.41 cannot preserve Anthropic ToolResult.is_error = true",
+                    "Rig 0.42 cannot preserve Anthropic ToolResult.is_error = true",
                 );
             }
         }
@@ -241,10 +324,10 @@ impl OllamaRequestMapper {
 impl RigRequestMapper for OllamaRequestMapper {
     fn map_request(
         &self,
-        mut request: ArmillaeCompletionRequest,
+        request: ArmillaeCompletionRequest,
         defaults: &GenerationOptions,
     ) -> Result<RigRequestProjection, BridgeError> {
-        rewrite_ollama_tool_result_ids(&mut request)?;
+        validate_ollama_tool_results(&request)?;
         let parts = convert::request_parts(request, defaults, "ollama")?;
         if !parts.extensions.values.is_empty() {
             return invalid_request("Ollama request extensions are not supported");
@@ -286,13 +369,11 @@ impl RigRequestMapper for OllamaRequestMapper {
     }
 }
 
-fn rewrite_ollama_tool_result_ids(
-    request: &mut ArmillaeCompletionRequest,
-) -> Result<(), BridgeError> {
+fn validate_ollama_tool_results(request: &ArmillaeCompletionRequest) -> Result<(), BridgeError> {
     let mut tool_names = std::collections::BTreeMap::new();
 
-    for message in &mut request.messages {
-        for content in &mut message.content {
+    for message in &request.messages {
+        for content in &message.content {
             match content {
                 ContentPart::ToolCall(call) => {
                     if call.name.trim().is_empty() {
@@ -307,10 +388,11 @@ fn rewrite_ollama_tool_result_ids(
                                 .to_owned(),
                         }
                     })?;
-                    result.call_id =
-                        ToolCallId::new(name.clone()).map_err(|_| BridgeError::InvalidRequest {
-                            message: "Ollama ToolResult resolved to an empty tool name".to_owned(),
-                        })?;
+                    if name.is_empty() {
+                        return Err(BridgeError::InvalidRequest {
+                            message: "Ollama tool name is empty".into(),
+                        });
+                    }
                 }
                 _ => {}
             }

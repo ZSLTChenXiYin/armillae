@@ -1,7 +1,7 @@
 use armillae_core::{
     AssistantContent as ArmillaeAssistantContent, CompletionRequest as ArmillaeCompletionRequest,
     ContentPart, GenerationOptions, Message as ArmillaeMessage, OutputFormat, ProviderData,
-    ProviderExtensions, Role, TextContent, TokenUsage, ToolCallId,
+    ProviderExtensions, Role, StructuredOutputMode, TextContent, TokenUsage, ToolCallId,
     ToolChoice as ArmillaeToolChoice, ToolDefinition as ArmillaeToolDefinition,
     ToolResult as ArmillaeToolResult, ToolResultContent as ArmillaeToolResultContent,
 };
@@ -9,7 +9,6 @@ use armillae_llm::{
     BridgeError, CompatibilityAction, CompatibilityFact, MessageContentLocation, ProjectionReport,
 };
 use rig_core::{
-    OneOrMany,
     completion::{ToolDefinition as RigToolDefinition, Usage as RigUsage},
     message::{
         AssistantContent as RigAssistantContent, Message as RigMessage, Reasoning as RigReasoning,
@@ -22,7 +21,7 @@ use serde_json::{Map, Value};
 
 #[derive(Debug)]
 pub(crate) struct RequestParts {
-    pub(crate) chat_history: OneOrMany<RigMessage>,
+    pub(crate) chat_history: Vec<RigMessage>,
     pub(crate) tools: Vec<RigToolDefinition>,
     pub(crate) tool_choice: Option<RigToolChoice>,
     pub(crate) output_format: Option<OutputFormat>,
@@ -46,6 +45,25 @@ pub(crate) fn request_parts(
     } = request;
 
     let (chat_history, facts) = messages_to_rig(messages, target_provider)?;
+    let output_format = match output_format {
+        Some(OutputFormat::Structured { name, schema, mode }) => Some(match mode {
+            StructuredOutputMode::NativeStrict => {
+                crate::request::validate_native_structured_schema(&schema)?;
+                OutputFormat::JsonSchema {
+                    name,
+                    schema,
+                    strict: true,
+                }
+            }
+            StructuredOutputMode::JsonObjectValidated => OutputFormat::JsonObject,
+            _ => {
+                return Err(BridgeError::UnsupportedCapability {
+                    capability: "output_format.structured.unknown_mode".to_owned(),
+                });
+            }
+        }),
+        other => other,
+    };
 
     Ok(RequestParts {
         chat_history,
@@ -80,7 +98,7 @@ pub(crate) fn merge_generation_options(
 pub(crate) fn messages_to_rig(
     messages: Vec<ArmillaeMessage>,
     target_provider: &str,
-) -> Result<(OneOrMany<RigMessage>, Vec<CompatibilityFact>), BridgeError> {
+) -> Result<(Vec<RigMessage>, Vec<CompatibilityFact>), BridgeError> {
     let mut converted = Vec::new();
     let mut facts = Vec::new();
     for (message_index, message) in messages.into_iter().enumerate() {
@@ -92,7 +110,33 @@ pub(crate) fn messages_to_rig(
         )?);
     }
 
-    let messages = one_or_many(
+    let mut calls = std::collections::HashMap::new();
+    for message in &mut converted {
+        match message {
+            RigMessage::Assistant { content, .. } => {
+                for part in content {
+                    if let RigAssistantContent::ToolCall(call) = part {
+                        calls.insert(
+                            call.id.to_string(),
+                            (call.function.name.clone(), call.provider.clone()),
+                        );
+                    }
+                }
+            }
+            RigMessage::User { content } => {
+                for part in content {
+                    if let RigUserContent::ToolResult(result) = part
+                        && let Some((name, provider)) = calls.get(result.call.as_str())
+                    {
+                        result.name = name.clone();
+                        result.provider = provider.clone();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let messages = nonempty(
         converted,
         "completion request must contain at least one message",
     )?;
@@ -150,7 +194,7 @@ fn message_to_rig(
                 return Ok(Vec::new());
             }
             Ok(vec![RigMessage::User {
-                content: one_or_many(content, "user messages must contain compatible content")?,
+                content: nonempty(content, "user messages must contain compatible content")?,
             }])
         }
         Role::Assistant => {
@@ -161,7 +205,7 @@ fn message_to_rig(
             }
             Ok(vec![RigMessage::Assistant {
                 id: None,
-                content: one_or_many(
+                content: nonempty(
                     content,
                     "assistant messages must contain compatible content",
                 )?,
@@ -192,7 +236,7 @@ fn message_to_rig(
                 return Ok(Vec::new());
             }
             Ok(vec![RigMessage::User {
-                content: one_or_many(content, "tool messages must contain ToolResult content")?,
+                content: nonempty(content, "tool messages must contain ToolResult content")?,
             }])
         }
         _ => Err(BridgeError::UnsupportedCapability {
@@ -233,8 +277,12 @@ fn assistant_contents_to_rig(
             }
             ContentPart::ToolCall(call) => {
                 converted.push(RigAssistantContent::ToolCall(RigToolCall {
-                    id: call.id.into_inner(),
-                    call_id: None,
+                    id: rig_core::message::ToolCallId::new(call.id.as_str()).ok_or_else(|| {
+                        BridgeError::InvalidRequest {
+                            message: "empty ToolCall ID".into(),
+                        }
+                    })?,
+                    provider: rig_core::message::ProviderCallId::new(call.id.into_inner()),
                     function: ToolFunction::new(call.name, call.arguments),
                     signature: None,
                     additional_params: None,
@@ -358,7 +406,10 @@ fn replay_tool_call_metadata(
             "tool_call_metadata",
         ));
     };
-    call.call_id = call_id;
+    if let Some(call_id) = call_id {
+        call.provider = rig_core::message::ProviderCallId::new(call_id)
+            .map(|id| id.with_item_id(call.id.as_str()));
+    }
     call.signature = signature;
     call.additional_params = additional_params;
     Ok(())
@@ -464,9 +515,14 @@ fn tool_result_to_rig(result: ArmillaeToolResult) -> Result<RigToolResult, Bridg
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(RigToolResult {
-        id: result.call_id.into_inner(),
-        call_id: None,
-        content: one_or_many(content, "ToolResult must contain at least one content item")?,
+        call: rig_core::message::ToolCallId::new(result.call_id.as_str()).ok_or_else(|| {
+            BridgeError::InvalidRequest {
+                message: "empty ToolResult ID".into(),
+            }
+        })?,
+        provider: rig_core::message::ProviderCallId::new(result.call_id.into_inner()),
+        name: String::new(),
+        content: nonempty(content, "ToolResult must contain at least one content item")?,
     })
 }
 
@@ -495,7 +551,7 @@ fn tool_choice_to_rig(choice: ArmillaeToolChoice) -> Result<RigToolChoice, Bridg
 }
 
 pub(crate) fn assistant_content_from_rig(
-    choice: OneOrMany<RigAssistantContent>,
+    choice: Vec<RigAssistantContent>,
     provider: &str,
 ) -> Result<Vec<ArmillaeAssistantContent>, BridgeError> {
     let mut converted = Vec::new();
@@ -508,27 +564,39 @@ pub(crate) fn assistant_content_from_rig(
                 } = text;
                 converted.push(ArmillaeAssistantContent::Text(TextContent::new(text)));
                 if let Some(value) = additional_params {
-                    converted.push(provider_data(provider, "text_metadata", value));
+                    converted.push(provider_data(provider, "text_metadata", value.into_value()));
                 }
             }
             RigAssistantContent::ToolCall(call) => {
+                if call.provider.is_none() && provider != "ollama" {
+                    return Err(BridgeError::InvalidProviderResponse {
+                        message: "provider omitted ToolCall ID".into(),
+                        metadata: armillae_llm::ErrorMetadata::new(provider),
+                    });
+                }
                 let RigToolCall {
                     id,
-                    call_id,
+                    provider: identity,
                     function,
                     signature,
                     additional_params,
                 } = call;
                 converted.push(ArmillaeAssistantContent::ToolCall(
                     armillae_core::ToolCall {
-                        id: tool_call_id_from_rig(id, provider)?,
+                        id: tool_call_id_from_rig(
+                            identity
+                                .as_ref()
+                                .and_then(|p| p.item_id.clone())
+                                .unwrap_or_else(|| id.into_string()),
+                            provider,
+                        )?,
                         name: function.name,
                         arguments: function.arguments,
                     },
                 ));
 
                 let mut metadata = Map::new();
-                if let Some(call_id) = call_id {
+                if let Some(call_id) = identity.filter(|p| p.item_id.is_some()).map(|p| p.call_id) {
                     metadata.insert("call_id".to_owned(), Value::String(call_id));
                 }
                 if let Some(signature) = signature {
@@ -613,17 +681,11 @@ fn tool_call_id_from_rig(id: String, provider: &str) -> Result<ToolCallId, Bridg
     })
 }
 
-fn one_or_many<T: Clone>(items: Vec<T>, message: &str) -> Result<OneOrMany<T>, BridgeError> {
-    match items.len() {
-        0 => invalid_request(message),
-        1 => items.into_iter().next().map(OneOrMany::one).ok_or_else(|| {
-            BridgeError::InvalidRequest {
-                message: message.to_owned(),
-            }
-        }),
-        _ => OneOrMany::many(items).map_err(|_| BridgeError::InvalidRequest {
-            message: message.to_owned(),
-        }),
+fn nonempty<T>(items: Vec<T>, message: &str) -> Result<Vec<T>, BridgeError> {
+    if items.is_empty() {
+        invalid_request(message)
+    } else {
+        Ok(items)
     }
 }
 
@@ -641,13 +703,10 @@ mod tests {
         ToolResult, ToolResultContent,
     };
     use armillae_llm::{BridgeError, CompatibilityAction};
-    use rig_core::{
-        OneOrMany,
-        message::{
-            AssistantContent as RigAssistantContent, Message as RigMessage,
-            Reasoning as RigReasoning, ToolCall as RigToolCall, ToolFunction,
-            ToolResultContent as RigToolResultContent, UserContent as RigUserContent,
-        },
+    use rig_core::message::{
+        AssistantContent as RigAssistantContent, Message as RigMessage, Reasoning as RigReasoning,
+        ToolCall as RigToolCall, ToolFunction, ToolResultContent as RigToolResultContent,
+        UserContent as RigUserContent,
     };
     use serde_json::json;
 
@@ -705,7 +764,7 @@ mod tests {
             "ollama",
         ] {
             let converted = assistant_content_from_rig(
-                OneOrMany::one(RigAssistantContent::Reasoning(RigReasoning::new(""))),
+                vec![RigAssistantContent::Reasoning(RigReasoning::new(""))],
                 provider,
             )
             .unwrap_or_else(|error| panic!("{provider} empty reasoning must normalize: {error}"));
@@ -729,8 +788,10 @@ mod tests {
             serde_json::from_value(json!({ "id": null, "content": [] }))
                 .expect("empty reasoning fixture must deserialize"),
         ];
-        let choice = OneOrMany::many(reasonings.into_iter().map(RigAssistantContent::Reasoning))
-            .expect("meaningful reasoning fixtures must be non-empty");
+        let choice = reasonings
+            .into_iter()
+            .map(RigAssistantContent::Reasoning)
+            .collect();
 
         let converted = assistant_content_from_rig(choice, "anthropic")
             .expect("state-bearing reasoning must normalize");
@@ -845,7 +906,7 @@ mod tests {
         };
         let result_content = result.content.into_iter().collect::<Vec<_>>();
 
-        assert_eq!(result.id, "call-1");
+        assert_eq!(result.call, "call-1");
         assert!(
             matches!(&result_content[0], RigToolResultContent::Text(text) if text.text == "lookup failed")
         );
@@ -885,7 +946,7 @@ mod tests {
             "ollama",
         ] {
             let canonical = assistant_content_from_rig(
-                rig_core::OneOrMany::one(RigAssistantContent::reasoning("consider this")),
+                vec![RigAssistantContent::reasoning("consider this")],
                 provider,
             )
             .expect("reasoning response content must normalize");
@@ -990,13 +1051,14 @@ mod tests {
     #[test]
     fn same_provider_tool_call_metadata_replays_onto_the_preceding_call() {
         let canonical = assistant_content_from_rig(
-            rig_core::OneOrMany::one(RigAssistantContent::ToolCall(RigToolCall {
-                id: "call-1".to_owned(),
-                call_id: Some("provider-call-1".to_owned()),
+            vec![RigAssistantContent::ToolCall(RigToolCall {
+                id: rig_core::message::ToolCallId::new("call-1").expect("fixture id"),
+                provider: rig_core::message::ProviderCallId::new("provider-call-1")
+                    .map(|p| p.with_item_id("call-1")),
                 function: ToolFunction::new("lookup".to_owned(), json!({ "q": "armillae" })),
                 signature: Some("signature-1".to_owned()),
                 additional_params: Some(json!({ "future": true })),
-            })),
+            })],
             "openai",
         )
         .expect("ToolCall metadata must normalize");
@@ -1022,7 +1084,10 @@ mod tests {
             panic!("expected replayed ToolCall");
         };
         assert_eq!(call.id, "call-1");
-        assert_eq!(call.call_id.as_deref(), Some("provider-call-1"));
+        assert_eq!(
+            call.provider.as_ref().map(|p| p.call_id.as_str()),
+            Some("provider-call-1")
+        );
         assert_eq!(call.signature.as_deref(), Some("signature-1"));
         assert_eq!(call.additional_params, Some(json!({ "future": true })));
     }
@@ -1030,7 +1095,7 @@ mod tests {
     #[test]
     fn rig_specific_content_is_preserved_as_provider_data() {
         let content = assistant_content_from_rig(
-            rig_core::OneOrMany::one(RigAssistantContent::reasoning("consider this")),
+            vec![RigAssistantContent::reasoning("consider this")],
             "openai",
         )
         .expect("reasoning must serialize into ProviderData");
@@ -1045,13 +1110,13 @@ mod tests {
     #[test]
     fn empty_provider_tool_call_id_is_rejected() {
         let result = assistant_content_from_rig(
-            rig_core::OneOrMany::one(RigAssistantContent::ToolCall(RigToolCall {
-                id: String::new(),
-                call_id: None,
+            vec![RigAssistantContent::ToolCall(RigToolCall {
+                id: rig_core::message::ToolCallId::mint(),
+                provider: None,
                 function: ToolFunction::new("lookup".to_owned(), json!({ "query": "armillae" })),
                 signature: None,
                 additional_params: None,
-            })),
+            })],
             "openai",
         );
 

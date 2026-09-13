@@ -3,7 +3,7 @@
 > 状态：Active；P7 直接 canonical projection 离线完成，fallback Router 与 Live 回归待实现
 > 技术事实来源：[LLM Bridge、Router 与 Tool Executor Spec](../specs/llm-bridge.md)
 > 设计入口：[Armillae 设计索引](../DESIGN.md)
-> 最后核对：2026-08-27
+> 最后核对：2026-09-11
 
 本清单只记录 LLM Bridge、Router 与 Tool Executor 设计和当前实现之间的差异。
 
@@ -274,7 +274,7 @@
 - [x] 汇总 Rig 已暴露的 Usage、ProviderData 和最终 `CompletionResponse`。
 - [x] 在 Rig 已暴露事实范围内保证最终流式响应与等价非流式响应具有一致语义结构。
 - [x] 未识别 Provider 事件通过 `ProviderEvent` 暴露。
-- [x] rig 0.41 未暴露的流式 response ID、model 和 finish reason 保持 `None`，不根据请求或
+- [x] Rig 0.42 暴露的流式 response ID、model 和 finish reason 已保留；缺席保持 `None`，不根据请求或
       内容推断。
 
 ### Streaming 测试
@@ -450,3 +450,30 @@
 - 独立模型与数据能力：`armillae-embedding`、`armillae-vector-store` 与 `armillae-rag`。
 
 - [x] 保留 HTTP status 与类型化 transport/OS 失败事实；验证真实本地 HTTP 403、429、5xx、连接失败和超时。
+
+## 全 Provider 结构化结果（Spec 7.2.1）
+
+- [x] 新增显式 NativeStrict / JsonObjectValidated 协议、独立能力、Schema round-trip 与快照。
+- [x] 统一 Schema 预编译、离线引用边界、结构化错误、complete/stream 最终结果校验与 Mock。
+- [x] 全七个 Provider 配置入口两种模式 × complete/stream 的 wire/拒绝/失败/取消矩阵。
+- [x] 示例与默认 ignored 的显式模式 Live 门禁；格式、Clippy、离线测试通过。
+- [ ] 全七个入口的授权 Live 证据齐全（不得以离线矩阵或部分 Provider 通过替代）。
+
+2026-09-11：RFC 0004 已接受上游升级路线；Rig 0.42.0 全 Provider 离线回归通过，合法 JSON
+后 EOF 假成功已修复。终端原因、错误不重试、未知事件和取消均有回归证据，见
+[0.42 Spike](../spikes/rig-core-0.42.0.md)。
+Live 测试已补齐 28 个显式入口，全部保持 ignored；待模型/endpoint/凭证引用与调用授权。
+
+## RFC 0004：Rig 0.42.0 迁移
+
+- [x] 精确升级正常与测试依赖，迁移七个入口的私有原生 Driver、请求容器与流事件。
+- [x] 保留原生结束原因、身份、Usage、工具 ID 与未知事件；首错终止且无自动重发。
+- [x] 全 Provider complete/stream 与结构化模式离线矩阵、UTF-8/EOF/取消/错误回归通过。
+- [x] 完成 fmt、Clippy、相关测试并记录 0.42 Spike 与公开接口/安全审计。
+- [ ] 获得凭证与授权后执行真实 Provider Live 矩阵（离线通过不能替代）。
+
+- [x] 按 Spec 7.5 公开 `TransportConfig.max_redirects`（默认 0），统一全部七个 Provider
+  的 HTTP Client 构造，验证禁用、有限跟随、超限以及非流式/流式失败事实。
+  验证：七个 Provider × complete/stream × 三种策略场景，共 42 组本地 HTTP 检查；
+  相关测试 154 通过、33 Live ignored，格式与 Clippy 通过。Rig SSE 超限错误的具体传输
+  类型缺席，已在 Spec 7.5 记录；不影响次数限制和流式失败终止。

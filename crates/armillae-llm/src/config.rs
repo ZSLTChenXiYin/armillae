@@ -159,6 +159,11 @@ pub struct TransportConfig {
     pub connect_timeout_ms: u64,
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
+    /// Maximum automatic HTTP redirects. Defaults to zero (do not follow).
+    /// Positive values allow reqwest's redirect behavior, including cross-origin
+    /// redirects; construction-time `EndpointPolicy` is not reapplied to targets.
+    #[serde(default)]
+    pub max_redirects: usize,
 }
 
 impl TransportConfig {
@@ -181,6 +186,7 @@ impl Default for TransportConfig {
         Self {
             connect_timeout_ms: Self::DEFAULT_CONNECT_TIMEOUT_MS,
             request_timeout_ms: Self::DEFAULT_REQUEST_TIMEOUT_MS,
+            max_redirects: 0,
         }
     }
 }
