@@ -1247,7 +1247,9 @@ fn export_order_preserved_after_merge_split_and_carve() {
         .collect();
     assert_eq!(
         texts,
-        vec!["q0", "a0", "q1", "a1", "done", "q2", "a2", "q3", "a3", "done", "q4", "a4"],
+        vec![
+            "q0", "a0", "q1", "a1", "done", "q2", "a2", "q3", "a3", "done", "q4", "a4"
+        ],
         "export order must be chronological after merge"
     );
 
@@ -1276,7 +1278,9 @@ fn export_order_preserved_after_merge_split_and_carve() {
         .collect();
     assert_eq!(
         texts,
-        vec!["q0", "a0", "q1", "a1", "done", "q2", "a2", "q3", "a3", "done", "q4", "a4"],
+        vec![
+            "q0", "a0", "q1", "a1", "done", "q2", "a2", "q3", "a3", "done", "q4", "a4"
+        ],
         "export order must be chronological after split"
     );
 }
