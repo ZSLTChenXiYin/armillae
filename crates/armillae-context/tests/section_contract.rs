@@ -1185,19 +1185,33 @@ fn export_order_preserved_after_merge_split_and_carve() {
 
     // 三个小节：s0=[q0, q1] s1=[q2, q3] s2=[q4]
     context.push_user_input(user("q0")).expect("push");
-    context.apply_model_output(assistant("a0"), usage(1)).expect("apply");
+    context
+        .apply_model_output(assistant("a0"), usage(1))
+        .expect("apply");
     context.push_user_input(user("q1")).expect("push");
-    context.apply_model_output(assistant("a1"), usage(1)).expect("apply");
-    context.apply_model_output(record_section_call(0, None, "call-1"), usage(1)).expect("carve s1");
+    context
+        .apply_model_output(assistant("a1"), usage(1))
+        .expect("apply");
+    context
+        .apply_model_output(record_section_call(0, None, "call-1"), usage(1))
+        .expect("carve s1");
     // s1
     context.push_user_input(user("q2")).expect("push");
-    context.apply_model_output(assistant("a2"), usage(1)).expect("apply");
+    context
+        .apply_model_output(assistant("a2"), usage(1))
+        .expect("apply");
     context.push_user_input(user("q3")).expect("push");
-    context.apply_model_output(assistant("a3"), usage(1)).expect("apply");
-    context.apply_model_output(record_section_call(0, None, "call-2"), usage(1)).expect("carve s2");
+    context
+        .apply_model_output(assistant("a3"), usage(1))
+        .expect("apply");
+    context
+        .apply_model_output(record_section_call(0, None, "call-2"), usage(1))
+        .expect("carve s2");
     // s2
     context.push_user_input(user("q4")).expect("push");
-    context.apply_model_output(assistant("a4"), usage(1)).expect("apply");
+    context
+        .apply_model_output(assistant("a4"), usage(1))
+        .expect("apply");
 
     // 合并 s0, s1 → 导出顺序应为 q0/a0 ... q3/a3 再 q4/a4
     let s0 = context.section_mappings()[0].id;
@@ -1210,16 +1224,27 @@ fn export_order_preserved_after_merge_split_and_carve() {
             m.content
                 .iter()
                 .filter_map(|part| {
-                    if let ContentPart::Text(t) = part { Some(t.as_str()) } else { None }
+                    if let ContentPart::Text(t) = part {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
                 })
                 .next()
         })
         .collect();
-    assert_eq!(texts, vec!["q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4"],
-        "export order must be chronological after merge");
+    assert_eq!(
+        texts,
+        vec!["q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4"],
+        "export order must be chronological after merge"
+    );
 
     // 拆分 s2 → 插入中间，导出顺序不变
-    context.split_section(context.section_mappings().last().expect("last section").id, 1)
+    context
+        .split_section(
+            context.section_mappings().last().expect("last section").id,
+            1,
+        )
         .expect("split");
     let exported = context.export().expect("export after split");
     let texts: Vec<&str> = exported
@@ -1228,13 +1253,20 @@ fn export_order_preserved_after_merge_split_and_carve() {
             m.content
                 .iter()
                 .filter_map(|part| {
-                    if let ContentPart::Text(t) = part { Some(t.as_str()) } else { None }
+                    if let ContentPart::Text(t) = part {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
                 })
                 .next()
         })
         .collect();
-    assert_eq!(texts, vec!["q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4"],
-        "export order must be chronological after split");
+    assert_eq!(
+        texts,
+        vec!["q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4"],
+        "export order must be chronological after split"
+    );
 }
 
 #[test]
