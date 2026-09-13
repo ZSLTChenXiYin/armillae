@@ -16,6 +16,63 @@ use crate::protocol::{CompressionState, CompressionTarget};
 
 pub use crate::memory::InMemorySectionStore;
 
+/// Store stub that fails all write operations (spec §12 test fixture).
+pub struct FailingStore;
+
+impl crate::store::SectionStore for FailingStore {
+    fn save_state(&self, _state: &crate::store::SectionState) -> Result<(), crate::store::StoreError> {
+        Err(crate::store::StoreError::Backend {
+            message: "FailingStore always fails".to_owned(),
+        })
+    }
+    fn load_state(&self, _session_id: &str) -> Result<Option<crate::store::SectionState>, crate::store::StoreError> {
+        Ok(None)
+    }
+    fn delete_state(&self, _session_id: &str) -> Result<(), crate::store::StoreError> {
+        Err(crate::store::StoreError::Backend {
+            message: "FailingStore always fails".to_owned(),
+        })
+    }
+    fn save_compressed(&self, _entry: &crate::store::SectionCompressedEntry) -> Result<crate::store::CompressedRef, crate::store::StoreError> {
+        Err(crate::store::StoreError::Backend {
+            message: "FailingStore always fails".to_owned(),
+        })
+    }
+    fn load_compressed(
+        &self,
+        _session_id: &str,
+        _reference: &crate::store::CompressedRef,
+    ) -> Result<Option<crate::store::SectionCompressedEntry>, crate::store::StoreError> {
+        Ok(None)
+    }
+    fn delete_compressed(
+        &self,
+        _session_id: &str,
+        _reference: &crate::store::CompressedRef,
+    ) -> Result<(), crate::store::StoreError> {
+        Err(crate::store::StoreError::Backend {
+            message: "FailingStore always fails".to_owned(),
+        })
+    }
+    fn save_original(&self, _entry: &crate::store::SectionOriginalEntry) -> Result<crate::store::OriginalRef, crate::store::StoreError> {
+        Err(crate::store::StoreError::Backend {
+            message: "FailingStore always fails".to_owned(),
+        })
+    }
+    fn load_original(
+        &self,
+        _session_id: &str,
+        _reference: &crate::store::OriginalRef,
+    ) -> Result<Option<crate::store::SectionOriginalEntry>, crate::store::StoreError> {
+        Ok(None)
+    }
+    fn delete_original(&self, _session_id: &str, _reference: &crate::store::OriginalRef) -> Result<(), crate::store::StoreError> {
+        Err(crate::store::StoreError::Backend {
+            message: "FailingStore always fails".to_owned(),
+        })
+    }
+}
+
 /// Scripted `Context` implementation with deterministic evaluation.
 pub struct MockContext {
     machine: CompressionMachine,

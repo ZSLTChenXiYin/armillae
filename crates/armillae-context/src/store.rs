@@ -61,7 +61,6 @@ pub struct SectionCompressedEntry {
     pub compressed_text: Vec<Message>,
     pub original_ref: OriginalRef,
     pub version: u64,
-    #[schemars(with = "String")]
     pub archived_at: SystemTime,
 }
 
@@ -72,7 +71,6 @@ pub struct SectionOriginalEntry {
     pub target: CompressionTarget,
     pub messages: Vec<Message>,
     pub version: u64,
-    #[schemars(with = "String")]
     pub archived_at: SystemTime,
 }
 

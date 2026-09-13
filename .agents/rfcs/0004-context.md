@@ -218,7 +218,7 @@ evaluate_compression() -> None：跳过；Some(目标)：进入已评估（冻�
 
 - Context trait 最薄：跨范式契约只含"生产可推理的上下文"，范式切换无感；
 - 范式完全黑盒自治：配置 / 构造 / 装配 / 持久化 / 内部实现全部自由；
-- 新范式 = 实现薄 Context + 自己的 Config / Store 契约，无需修改既有代码与公共接口；
+- 新范式 = 实现薄 Context + 自己的 Config / Store 契约，首阶段只承诺上游内置范式扩展（`CompressionTarget` 已 `#[non_exhaustive]` 保留上游扩展空间，不支持第三方扩展）；
 - 压缩执行外包、下游零组装，context 零 LLM 依赖（只依赖 core）；
 - Store 契约贴合范式（每个范式定义自己的条目类型与接口）；
 - 缓存区前置的导出天然适配 OpenAI 自动前缀缓存（Anthropic 断点落法为后续扩展）。

@@ -515,10 +515,11 @@ impl SectionContext {
             compressed_ref: None,
             summary: None,
         };
+        let insert_at = indices[0];
         for &index in indices.iter().rev() {
             self.sections.remove(index);
         }
-        self.sections.push(merged);
+        self.sections.insert(insert_at, merged);
         self.save_state_if_session()
     }
 
@@ -554,7 +555,7 @@ impl SectionContext {
             compressed_ref: None,
             summary: None,
         };
-        self.sections.push(split);
+        self.sections.insert(index + 1, split);
         self.save_state_if_session()
     }
 
@@ -828,11 +829,20 @@ impl SectionContext {
         self.ensure_write_target();
         let last = self.sections.len() - 1;
         let section = &mut self.sections[last];
+        // 过滤 ProviderData：Context 不维护 Provider 私有数据（spec §8.3）
+        let filtered = Message {
+            content: message
+                .content
+                .into_iter()
+                .filter(|part| !matches!(part, ContentPart::ProviderData(_)))
+                .collect(),
+            ..message
+        };
         if let Some(turn) = section.turns.last_mut() {
-            turn.messages.push(message);
+            turn.messages.push(filtered);
         } else {
             section.turns.push(Turn {
-                messages: vec![message],
+                messages: vec![filtered],
             });
         }
     }
@@ -840,8 +850,16 @@ impl SectionContext {
     fn start_new_turn(&mut self, message: Message) {
         self.ensure_write_target();
         let last = self.sections.len() - 1;
+        let filtered = Message {
+            content: message
+                .content
+                .into_iter()
+                .filter(|part| !matches!(part, ContentPart::ProviderData(_)))
+                .collect(),
+            ..message
+        };
         self.sections[last].turns.push(Turn {
-            messages: vec![message],
+            messages: vec![filtered],
         });
     }
 
@@ -899,13 +917,14 @@ impl SectionContext {
 
         // 跨小节（含子集）→ 裁出新小节（轮次恢复为时间顺序）
         let source_label = self.sections[collected[0].0].label.clone();
-        let mut new_turns: Vec<Turn> = collected
-            .iter()
-            .map(|(section_index, turn_index)| {
-                self.sections[*section_index].turns[*turn_index].clone()
-            })
-            .collect();
-        new_turns.reverse();
+        let mut group_turns: BTreeMap<usize, Vec<Turn>> = BTreeMap::new();
+        for (section_index, turn_index) in &collected {
+            group_turns
+                .entry(*section_index)
+                .or_default()
+                .push(self.sections[*section_index].turns[*turn_index].clone());
+        }
+        let new_turns: Vec<Turn> = group_turns.into_values().flatten().collect();
         let mut by_section: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (section_index, turn_index) in &collected {
             by_section
@@ -923,7 +942,10 @@ impl SectionContext {
         let mut index = self.sections.len();
         while index > 0 {
             index -= 1;
-            if self.sections[index].turns.is_empty() && !self.in_cache_zone(index) {
+            if self.sections[index].turns.is_empty()
+                && self.sections[index].view == View::Raw
+                && !self.in_cache_zone(index)
+            {
                 self.sections.remove(index);
             }
         }
@@ -1069,7 +1091,17 @@ impl Context for SectionContext {
     }
 
     fn apply_compression_result(&mut self, summary: Vec<Message>) -> Result<(), ContextError> {
-        self.machine.on_apply()?;
+        // 拒绝空摘要：剥离 record_section 痕迹后检查是否非空
+        let stripped = strip_record_section_traces(summary.clone());
+        if stripped.is_empty() {
+            return Err(ContextError::InvalidRequest {
+                message: "compression summary must be non-empty after stripping traces"
+                    .to_owned(),
+            });
+        }
+        // validate_convert_contract 确保摘要符合导出契约（spec §8.3）
+        validate_convert_contract(&stripped)?;
+
         let (section_id, original_ref) =
             self.pending_original
                 .take()
@@ -1083,17 +1115,24 @@ impl Context for SectionContext {
         // 压缩条目（summary 原生承载，无 JSON 序列化）
         let record_id = format!("compressed-{section_id}-{version}");
         let entry = SectionCompressedEntry {
-            session_id: session.clone(),
+            session_id: session,
             record_id,
             compressed_text: summary.clone(),
             original_ref: original_ref.clone(),
             version,
             archived_at: SystemTime::now(),
         };
-        let compressed_ref = self
-            .store
-            .save_compressed(&entry)
-            .map_err(ContextError::from)?;
+        let compressed_ref = match self.store.save_compressed(&entry) {
+            Ok(ref_) => ref_,
+            Err(e) => {
+                // Store 失败时恢复 pending_original，保持 Prepared 状态允许重试或放弃
+                self.pending_original = Some((section_id, original_ref));
+                return Err(ContextError::from(e));
+            }
+        };
+
+        // Store 写入成功后再推进状态机
+        self.machine.on_apply()?;
 
         let section = &mut self.sections[index];
         section.view = View::Compressed;

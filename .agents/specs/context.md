@@ -123,6 +123,7 @@ armillae-context ────depends on──► armillae-core（唯一依赖）
 pub enum CompressionTarget {
     Section { id: u64 },           // 小节范式（当前唯一实现）
     // 传统范式（规划中）所需形态在实现时作为新变体加入
+    // 首阶段只承诺上游内置范式扩展；第三方范式需等统一不透明标识契约
 }
 ```
 
@@ -493,9 +494,15 @@ Anthropic 未来在对应 ContentPart 上落 `cache_control`，当前 Adapter �
 ### 8.3 convert.rs 契约（export 输出必须满足）
 
 System 仅文本 / User 无 ToolCall / Assistant 无 ToolResult / Tool 仅 ToolResult / 消息
-content 非空 / 不含 `ProviderData`（导出侧校验拒绝）。注：convert.rs 对 `ProviderData`
-按投影规则处理（同 Provider 已知 kind 校验回放、外部/未知记录 `not_forwarded` 不注入
-wire request，见 llm-bridge Spec），export 输出校验比请求转换更严格。
+content 非空 / 不含 `ProviderData`（导出侧校验拒绝）。注：`apply_model_output` 和
+`push_user_input` 写入对话时即过滤 `ProviderData`，确保 Context 内部不持有 Provider 私有
+数据，下游无需在写入前手动剥离。convert.rs 对 `ProviderData` 的投影规则（同 Provider 已知
+kind 校验回放、外部/未知记录 `not_forwarded` 不注入 wire request，见 llm-bridge Spec）由
+Adapter 在 Completion 阶段处理，Context 不负责保留或回放 `ProviderData`。
+
+> 限制：首阶段 Context 不维护 `ProviderData`。当正常模型响应包含 reasoning、签名或 ToolCall
+> metadata 等 `ProviderData` 时，Adapter projection 后在写入 Context 前即被过滤。若下游链路
+> 需要同 Provider 回放，由 Adapter 自行管理原始响应数据。本限制不影响 Provider 缓存经济性
 
 ## 9. token 计数
 
@@ -504,6 +511,14 @@ wire request，见 llm-bridge Spec），export 输出校验比请求转换更严
 `usage.input_tokens`（有值才更新，官方计数 ≈ 当前上下文规模）；压缩提交后下一轮 usage
 自动校准；`TokenThreshold` 自动压缩模式评估：`token_facts.input_tokens >= threshold`；
 无需注入 tokenizer。
+
+> 限制与下游责任：`input_tokens` 描述的是上一次请求的输入，是一个**滞后信号**。追加新消息或
+> 已完成压缩都可能改变当前上下文规模，直到下一轮 usage 到达前该数值不反映最新情况。
+> - `TokenThreshold` 单独不能保证请求不超过模型上下文窗口；超窗预防由应用层 Agent Harness、
+>   Router 或调用方承担。
+> - 压缩提交后再次评估仍使用旧计数，若连续评估持续触发压缩（计数未更新前）属正常行为。
+> - 本限制不需要立即引入 tokenizer。若后续上游需求要求"预估值"或"窗口上限保证"，可作为新
+>   API 讨论。
 
 ## 10. 并发模型
 

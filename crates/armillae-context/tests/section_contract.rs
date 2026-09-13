@@ -1127,3 +1127,181 @@ fn apply_with_missing_input_tokens_is_tolerated_and_keeps_previous_facts() {
         "token facts must keep the previous round when input_tokens is missing"
     );
 }
+
+#[test]
+fn compress_then_carve_preserves_compressed_summary() {
+    // 压缩后继续对话、再划界，export 必须仍包含已压缩小节的摘要（issue 1）
+    let config = SectionConfig {
+        active_window: ActiveWindow::Sections { count: 1 },
+        auto_compression: Some(AutoCompression::TokenThreshold { threshold: 1 }),
+        ..default_config()
+    };
+    let (mut context, _store) = fresh(config);
+    four_rounds(&mut context);
+    // 划出 s1，压缩 s0
+    context
+        .apply_model_output(record_section_call(2, Some("dialog"), "call-1"), usage(10))
+        .expect("record_section");
+    let target = context
+        .evaluate_compression()
+        .expect("evaluate")
+        .expect("trigger");
+    context.prepare_compression(target).expect("prepare");
+    context
+        .apply_compression_result(vec![assistant("summary")])
+        .expect("apply");
+    assert!(
+        context.export().expect("export").iter().any(|m| {
+            m.content
+                .iter()
+                .any(|part| matches!(part, ContentPart::Text(t)) if t == "summary")
+        }),
+        "compressed summary must be present in export after apply"
+    );
+    // 继续对话，再划一次
+    context.push_user_input(user("q5")).expect("push");
+    context
+        .apply_model_output(record_section_call(1, Some("dialog"), "call-2"), usage(10))
+        .expect("record_section 2");
+    let exported = context.export().expect("export");
+    assert!(
+        exported.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|part| matches!(part, ContentPart::Text(t)) if t == "summary")
+        }),
+        "compressed summary must survive a second carve"
+    );
+}
+
+#[test]
+fn export_order_preserved_after_merge_split_and_carve() {
+    // 验证 export 消息顺序在 merge、split 和 carve 后保持正确时间顺序（issues 2, 4, 5）
+    let config = SectionConfig {
+        active_window: ActiveWindow::Sections { count: 1 },
+        ..default_config()
+    };
+    let (mut context, _store) = fresh(config);
+
+    // 三个小节：s0=[q0, q1] s1=[q2, q3] s2=[q4]
+    context.push_user_input(user("q0")).expect("push");
+    context.apply_model_output(assistant("a0"), usage(1)).expect("apply");
+    context.push_user_input(user("q1")).expect("push");
+    context.apply_model_output(assistant("a1"), usage(1)).expect("apply");
+    context.apply_model_output(record_section_call(0, None, "call-1"), usage(1)).expect("carve s1");
+    // s1
+    context.push_user_input(user("q2")).expect("push");
+    context.apply_model_output(assistant("a2"), usage(1)).expect("apply");
+    context.push_user_input(user("q3")).expect("push");
+    context.apply_model_output(assistant("a3"), usage(1)).expect("apply");
+    context.apply_model_output(record_section_call(0, None, "call-2"), usage(1)).expect("carve s2");
+    // s2
+    context.push_user_input(user("q4")).expect("push");
+    context.apply_model_output(assistant("a4"), usage(1)).expect("apply");
+
+    // 合并 s0, s1 → 导出顺序应为 q0/a0 ... q3/a3 再 q4/a4
+    let s0 = context.section_mappings()[0].id;
+    let s1 = context.section_mappings()[1].id;
+    context.merge_sections(vec![s0, s1], None).expect("merge");
+    let exported = context.export().expect("export");
+    let texts: Vec<&str> = exported
+        .iter()
+        .filter_map(|m| {
+            m.content
+                .iter()
+                .filter_map(|part| {
+                    if let ContentPart::Text(t) = part { Some(t.as_str()) } else { None }
+                })
+                .next()
+        })
+        .collect();
+    assert_eq!(texts, vec!["q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4"],
+        "export order must be chronological after merge");
+
+    // 拆分 s2 → 插入中间，导出顺序不变
+    context.split_section(context.section_mappings().last().expect("last section").id, 1)
+        .expect("split");
+    let exported = context.export().expect("export after split");
+    let texts: Vec<&str> = exported
+        .iter()
+        .filter_map(|m| {
+            m.content
+                .iter()
+                .filter_map(|part| {
+                    if let ContentPart::Text(t) = part { Some(t.as_str()) } else { None }
+                })
+                .next()
+        })
+        .collect();
+    assert_eq!(texts, vec!["q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4"],
+        "export order must be chronological after split");
+}
+
+#[test]
+fn apply_empty_summary_is_rejected_and_state_unchanged() {
+    // 空摘要拒绝，保留 Prepared 状态（issue 5）
+    let config = SectionConfig {
+        active_window: ActiveWindow::Sections { count: 1 },
+        auto_compression: Some(AutoCompression::TokenThreshold { threshold: 1 }),
+        ..default_config()
+    };
+    let (mut context, _store) = fresh(config);
+    four_rounds(&mut context);
+    context
+        .apply_model_output(record_section_call(1, Some("dialog"), "call-1"), usage(100))
+        .expect("record_section");
+    let target = context
+        .evaluate_compression()
+        .expect("evaluate")
+        .expect("trigger");
+    context.prepare_compression(target).expect("prepare");
+    // 空摘要
+    assert!(
+        matches!(
+            context.apply_compression_result(vec![]),
+            Err(ContextError::InvalidRequest { .. })
+        ),
+        "empty summary must be rejected"
+    );
+    // 被拒绝后：仍然可以重试
+    let target = context
+        .evaluate_compression()
+        .expect("evaluate")
+        .expect("trigger");
+    // 注意：已经 evaluated，不能再次 evaluate——目前还处于 Prepared 状态没有被改变
+    // 实际上 reject 在 state change 之前，所以状态还是 Prepared，可以 abandon
+    context.abandon_compression().expect("abandon");
+}
+
+#[test]
+fn fail_save_compressed_restores_prepared_state() {
+    // save_compressed 失败后保持 Prepared，可重试或 abandon（issue 3）
+    let config = SectionConfig {
+        active_window: ActiveWindow::Sections { count: 1 },
+        auto_compression: Some(AutoCompression::TokenThreshold { threshold: 1 }),
+        ..default_config()
+    };
+    let store = std::sync::Arc::new(armillae_context::testing::FailingStore);
+    let mut context = build(config, store);
+    context
+        .restore_session("test-session")
+        .expect("restore");
+    four_rounds(&mut context);
+    context
+        .apply_model_output(record_section_call(1, Some("dialog"), "call-1"), usage(100))
+        .expect("record_section");
+    let target = context
+        .evaluate_compression()
+        .expect("evaluate")
+        .expect("trigger");
+    context.prepare_compression(target).expect("prepare");
+    assert!(
+        matches!(
+            context.apply_compression_result(vec![assistant("summary")]),
+            Err(ContextError::Store { .. })
+        ),
+        "FailingStore must cause apply to fail"
+    );
+    // 失败后可以 abandon
+    context.abandon_compression().expect("abandon after failed save");
+}
