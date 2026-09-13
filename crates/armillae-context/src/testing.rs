@@ -20,12 +20,18 @@ pub use crate::memory::InMemorySectionStore;
 pub struct FailingStore;
 
 impl crate::store::SectionStore for FailingStore {
-    fn save_state(&self, _state: &crate::store::SectionState) -> Result<(), crate::store::StoreError> {
+    fn save_state(
+        &self,
+        _state: &crate::store::SectionState,
+    ) -> Result<(), crate::store::StoreError> {
         Err(crate::store::StoreError::Backend {
             message: "FailingStore always fails".to_owned(),
         })
     }
-    fn load_state(&self, _session_id: &str) -> Result<Option<crate::store::SectionState>, crate::store::StoreError> {
+    fn load_state(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<crate::store::SectionState>, crate::store::StoreError> {
         Ok(None)
     }
     fn delete_state(&self, _session_id: &str) -> Result<(), crate::store::StoreError> {
@@ -33,7 +39,10 @@ impl crate::store::SectionStore for FailingStore {
             message: "FailingStore always fails".to_owned(),
         })
     }
-    fn save_compressed(&self, _entry: &crate::store::SectionCompressedEntry) -> Result<crate::store::CompressedRef, crate::store::StoreError> {
+    fn save_compressed(
+        &self,
+        _entry: &crate::store::SectionCompressedEntry,
+    ) -> Result<crate::store::CompressedRef, crate::store::StoreError> {
         Err(crate::store::StoreError::Backend {
             message: "FailingStore always fails".to_owned(),
         })
@@ -54,7 +63,10 @@ impl crate::store::SectionStore for FailingStore {
             message: "FailingStore always fails".to_owned(),
         })
     }
-    fn save_original(&self, _entry: &crate::store::SectionOriginalEntry) -> Result<crate::store::OriginalRef, crate::store::StoreError> {
+    fn save_original(
+        &self,
+        _entry: &crate::store::SectionOriginalEntry,
+    ) -> Result<crate::store::OriginalRef, crate::store::StoreError> {
         Err(crate::store::StoreError::Backend {
             message: "FailingStore always fails".to_owned(),
         })
@@ -66,7 +78,11 @@ impl crate::store::SectionStore for FailingStore {
     ) -> Result<Option<crate::store::SectionOriginalEntry>, crate::store::StoreError> {
         Ok(None)
     }
-    fn delete_original(&self, _session_id: &str, _reference: &crate::store::OriginalRef) -> Result<(), crate::store::StoreError> {
+    fn delete_original(
+        &self,
+        _session_id: &str,
+        _reference: &crate::store::OriginalRef,
+    ) -> Result<(), crate::store::StoreError> {
         Err(crate::store::StoreError::Backend {
             message: "FailingStore always fails".to_owned(),
         })

@@ -1095,8 +1095,7 @@ impl Context for SectionContext {
         let stripped = strip_record_section_traces(summary.clone());
         if stripped.is_empty() {
             return Err(ContextError::InvalidRequest {
-                message: "compression summary must be non-empty after stripping traces"
-                    .to_owned(),
+                message: "compression summary must be non-empty after stripping traces".to_owned(),
             });
         }
         // validate_convert_contract 确保摘要符合导出契约（spec §8.3）
