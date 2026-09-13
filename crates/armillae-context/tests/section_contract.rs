@@ -958,7 +958,7 @@ fn export_rejects_each_convert_contract_violation() {
         "assistant messages must not contain tool results"
     );
 
-    // ProviderData 一律拒绝
+    // ProviderData 在写入时即被过滤（spec §8.3）
     let (mut context, _store) = fresh(default_config());
     context.push_user_input(user("hello")).expect("push");
     context
@@ -974,9 +974,13 @@ fn export_rejects_each_convert_contract_violation() {
             usage(3),
         )
         .expect("apply");
+    let exported = context.export().expect("export must succeed");
     assert!(
-        matches!(context.export(), Err(ContextError::InvalidRequest { .. })),
-        "provider data must be rejected from the export"
+        !exported.iter().any(|m| m
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::ProviderData(_)))),
+        "provider data must be filtered on write, not present in export"
     );
 }
 
@@ -1243,7 +1247,7 @@ fn export_order_preserved_after_merge_split_and_carve() {
         .collect();
     assert_eq!(
         texts,
-        vec!["q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4"],
+        vec!["q0", "a0", "q1", "a1", "done", "q2", "a2", "q3", "a3", "done", "q4", "a4"],
         "export order must be chronological after merge"
     );
 
@@ -1272,7 +1276,7 @@ fn export_order_preserved_after_merge_split_and_carve() {
         .collect();
     assert_eq!(
         texts,
-        vec!["q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4"],
+        vec!["q0", "a0", "q1", "a1", "done", "q2", "a2", "q3", "a3", "done", "q4", "a4"],
         "export order must be chronological after split"
     );
 }
@@ -1315,7 +1319,7 @@ fn fail_save_compressed_restores_prepared_state() {
         auto_compression: Some(AutoCompression::TokenThreshold { threshold: 1 }),
         ..default_config()
     };
-    let store = std::sync::Arc::new(armillae_context::testing::FailingStore);
+    let store = std::sync::Arc::new(armillae_context::testing::FailOnCompressStore::new());
     let mut context = build(config, store);
     context.restore_session("test-session").expect("restore");
     four_rounds(&mut context);
@@ -1332,7 +1336,7 @@ fn fail_save_compressed_restores_prepared_state() {
             context.apply_compression_result(vec![assistant("summary")]),
             Err(ContextError::Store { .. })
         ),
-        "FailingStore must cause apply to fail"
+        "FailOnCompressStore must cause apply to fail"
     );
     // 失败后可以 abandon
     context

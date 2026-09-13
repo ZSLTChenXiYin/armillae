@@ -89,6 +89,81 @@ impl crate::store::SectionStore for FailingStore {
     }
 }
 
+/// Store wrapper that delegates all operations to an `InMemorySectionStore`
+/// except `save_compressed` which always fails (spec §12 test fixture for
+/// Store-failure recovery).
+pub struct FailOnCompressStore {
+    inner: crate::memory::InMemorySectionStore,
+}
+
+impl FailOnCompressStore {
+    pub fn new() -> Self {
+        Self {
+            inner: crate::memory::InMemorySectionStore::new(),
+        }
+    }
+}
+
+impl crate::store::SectionStore for FailOnCompressStore {
+    fn save_state(
+        &self,
+        state: &crate::store::SectionState,
+    ) -> Result<(), crate::store::StoreError> {
+        self.inner.save_state(state)
+    }
+    fn load_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::store::SectionState>, crate::store::StoreError> {
+        self.inner.load_state(session_id)
+    }
+    fn delete_state(&self, session_id: &str) -> Result<(), crate::store::StoreError> {
+        self.inner.delete_state(session_id)
+    }
+    fn save_compressed(
+        &self,
+        _entry: &crate::store::SectionCompressedEntry,
+    ) -> Result<crate::store::CompressedRef, crate::store::StoreError> {
+        Err(crate::store::StoreError::Backend {
+            message: "FailOnCompressStore always fails save_compressed".to_owned(),
+        })
+    }
+    fn load_compressed(
+        &self,
+        session_id: &str,
+        reference: &crate::store::CompressedRef,
+    ) -> Result<Option<crate::store::SectionCompressedEntry>, crate::store::StoreError> {
+        self.inner.load_compressed(session_id, reference)
+    }
+    fn delete_compressed(
+        &self,
+        session_id: &str,
+        reference: &crate::store::CompressedRef,
+    ) -> Result<(), crate::store::StoreError> {
+        self.inner.delete_compressed(session_id, reference)
+    }
+    fn save_original(
+        &self,
+        entry: &crate::store::SectionOriginalEntry,
+    ) -> Result<crate::store::OriginalRef, crate::store::StoreError> {
+        self.inner.save_original(entry)
+    }
+    fn load_original(
+        &self,
+        session_id: &str,
+        reference: &crate::store::OriginalRef,
+    ) -> Result<Option<crate::store::SectionOriginalEntry>, crate::store::StoreError> {
+        self.inner.load_original(session_id, reference)
+    }
+    fn delete_original(
+        &self,
+        session_id: &str,
+        reference: &crate::store::OriginalRef,
+    ) -> Result<(), crate::store::StoreError> {
+        self.inner.delete_original(session_id, reference)
+    }
+}
+
 /// Scripted `Context` implementation with deterministic evaluation.
 pub struct MockContext {
     machine: CompressionMachine,
