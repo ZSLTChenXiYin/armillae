@@ -104,6 +104,12 @@ impl FailOnCompressStore {
     }
 }
 
+impl Default for FailOnCompressStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl crate::store::SectionStore for FailOnCompressStore {
     fn save_state(
         &self,
