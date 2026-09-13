@@ -1154,7 +1154,7 @@ fn compress_then_carve_preserves_compressed_summary() {
         context.export().expect("export").iter().any(|m| {
             m.content
                 .iter()
-                .any(|part| matches!(part, ContentPart::Text(t)) if t == "summary")
+                .any(|part| if let ContentPart::Text(t) = part { t.text == "summary" } else { false })
         }),
         "compressed summary must be present in export after apply"
     );
@@ -1168,7 +1168,7 @@ fn compress_then_carve_preserves_compressed_summary() {
         exported.iter().any(|m| {
             m.content
                 .iter()
-                .any(|part| matches!(part, ContentPart::Text(t)) if t == "summary")
+                .any(|part| if let ContentPart::Text(t) = part { t.text == "summary" } else { false })
         }),
         "compressed summary must survive a second carve"
     );
@@ -1295,13 +1295,7 @@ fn apply_empty_summary_is_rejected_and_state_unchanged() {
         ),
         "empty summary must be rejected"
     );
-    // 被拒绝后：仍然可以重试
-    let target = context
-        .evaluate_compression()
-        .expect("evaluate")
-        .expect("trigger");
-    // 注意：已经 evaluated，不能再次 evaluate——目前还处于 Prepared 状态没有被改变
-    // 实际上 reject 在 state change 之前，所以状态还是 Prepared，可以 abandon
+    // 被拒绝后状态仍是 Prepared，可以 abandon
     context.abandon_compression().expect("abandon");
 }
 
