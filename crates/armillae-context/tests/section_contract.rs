@@ -1177,6 +1177,7 @@ fn compress_then_carve_preserves_compressed_summary() {
                     false
                 }
             })
+        }),
         "compressed summary must survive a second carve"
     );
 }
