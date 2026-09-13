@@ -1152,13 +1152,11 @@ fn compress_then_carve_preserves_compressed_summary() {
         .expect("apply");
     assert!(
         context.export().expect("export").iter().any(|m| {
-            m.content
-                .iter()
-                .any(|part| if let ContentPart::Text(t) = part {
-                    t.text == "summary"
-                } else {
-                    false
-                })
+            m.content.iter().any(|part| if let ContentPart::Text(t) = part {
+                t.text == "summary"
+            } else {
+                false
+            })
         }),
         "compressed summary must be present in export after apply"
     );
@@ -1170,13 +1168,11 @@ fn compress_then_carve_preserves_compressed_summary() {
     let exported = context.export().expect("export");
     assert!(
         exported.iter().any(|m| {
-            m.content
-                .iter()
-                .any(|part| if let ContentPart::Text(t) = part {
-                    t.text == "summary"
-                } else {
-                    false
-                })
+            m.content.iter().any(|part| if let ContentPart::Text(t) = part {
+                t.text == "summary"
+            } else {
+                false
+            })
         }),
         "compressed summary must survive a second carve"
     );
