@@ -68,7 +68,7 @@ fn default_config() -> SectionConfig {
     }
 }
 
-fn build(config: SectionConfig, store: Arc<InMemorySectionStore>) -> SectionContext {
+fn build(config: SectionConfig, store: Arc<dyn SectionStore>) -> SectionContext {
     SectionContext::builder(config, store)
         .build()
         .expect("valid config must build")
@@ -1225,7 +1225,7 @@ fn export_order_preserved_after_merge_split_and_carve() {
                 .iter()
                 .filter_map(|part| {
                     if let ContentPart::Text(t) = part {
-                        Some(t.as_str())
+                        Some(t.text.as_str())
                     } else {
                         None
                     }
@@ -1254,7 +1254,7 @@ fn export_order_preserved_after_merge_split_and_carve() {
                 .iter()
                 .filter_map(|part| {
                     if let ContentPart::Text(t) = part {
-                        Some(t.as_str())
+                        Some(t.text.as_str())
                     } else {
                         None
                     }
