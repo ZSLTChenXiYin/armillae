@@ -1315,9 +1315,7 @@ fn fail_save_compressed_restores_prepared_state() {
     };
     let store = std::sync::Arc::new(armillae_context::testing::FailingStore);
     let mut context = build(config, store);
-    context
-        .restore_session("test-session")
-        .expect("restore");
+    context.restore_session("test-session").expect("restore");
     four_rounds(&mut context);
     context
         .apply_model_output(record_section_call(1, Some("dialog"), "call-1"), usage(100))
@@ -1335,5 +1333,7 @@ fn fail_save_compressed_restores_prepared_state() {
         "FailingStore must cause apply to fail"
     );
     // 失败后可以 abandon
-    context.abandon_compression().expect("abandon after failed save");
+    context
+        .abandon_compression()
+        .expect("abandon after failed save");
 }
