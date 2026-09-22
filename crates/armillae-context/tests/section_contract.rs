@@ -1347,3 +1347,97 @@ fn fail_save_compressed_restores_prepared_state() {
         .abandon_compression()
         .expect("abandon after failed save");
 }
+
+// —— 构建校验与失败恢复（review 修复） ——
+
+#[test]
+fn builder_rejects_zero_active_window_count() {
+    // 文档契约声明最小为 1；0 必须在构建期拒绝，而不是被静默改写为 1
+    let store = Arc::new(InMemorySectionStore::new());
+    let config = SectionConfig {
+        active_window: ActiveWindow::Sections { count: 0 },
+        ..default_config()
+    };
+    let invalid = SectionContext::builder(config, store).build();
+    assert!(
+        matches!(invalid, Err(ContextError::InvalidConfiguration { .. })),
+        "active window section count 0 must be rejected at build time"
+    );
+}
+
+#[test]
+fn prepare_with_invalid_target_keeps_pipeline_evaluated() {
+    // 目标不合法时不得把调用方冻结在 Prepared（无 pending_original）
+    let config = SectionConfig {
+        active_window: ActiveWindow::Sections { count: 1 },
+        auto_compression: Some(AutoCompression::TokenThreshold { threshold: 1 }),
+        ..default_config()
+    };
+    let (mut context, _store) = fresh(config);
+    four_rounds(&mut context);
+    context
+        .apply_model_output(record_section_call(1, Some("dialog"), "call-1"), usage(100))
+        .expect("record_section");
+    let target = context
+        .evaluate_compression()
+        .expect("evaluate")
+        .expect("trigger");
+    assert_eq!(context.compression_state(), CompressionState::Evaluated);
+
+    let missing = CompressionTarget::Section { id: 9999 };
+    let rejected = context.prepare_compression(missing);
+    assert!(
+        matches!(rejected, Err(ContextError::InvalidOperation { .. })),
+        "a nonexistent section must be rejected"
+    );
+    assert_eq!(
+        context.compression_state(),
+        CompressionState::Evaluated,
+        "a rejected prepare must not freeze the pipeline in Prepared"
+    );
+
+    // 未被冻结：用评估出的正确目标仍可 prepare
+    context.prepare_compression(target).expect("retry prepare");
+    assert_eq!(context.compression_state(), CompressionState::Prepared);
+}
+
+#[test]
+fn abandon_failure_keeps_pending_original_for_retry() {
+    // delete_original 失败时必须保留 pending_original 与 Prepared 状态
+    let config = SectionConfig {
+        active_window: ActiveWindow::Sections { count: 1 },
+        auto_compression: Some(AutoCompression::TokenThreshold { threshold: 1 }),
+        ..default_config()
+    };
+    let store = Arc::new(armillae_context::testing::FailOnDeleteOriginalStore::new());
+    let mut context = build(config, store);
+    context.restore_session("test-session").expect("restore");
+    four_rounds(&mut context);
+    context
+        .apply_model_output(record_section_call(1, Some("dialog"), "call-1"), usage(100))
+        .expect("record_section");
+    let target = context
+        .evaluate_compression()
+        .expect("evaluate")
+        .expect("trigger");
+    context.prepare_compression(target).expect("prepare");
+
+    let failed = context.abandon_compression();
+    assert!(
+        matches!(failed, Err(ContextError::Store { .. })),
+        "FailOnDeleteOriginalStore must surface the cleanup failure"
+    );
+    assert_eq!(
+        context.compression_state(),
+        CompressionState::Prepared,
+        "a failed abandon must not reset the pipeline state"
+    );
+
+    // 再次 abandon 仍会尝试删除并再次失败：引用未丢失，可重试清理
+    let retried = context.abandon_compression();
+    assert!(
+        matches!(retried, Err(ContextError::Store { .. })),
+        "the pending original must survive for a retry"
+    );
+    assert_eq!(context.compression_state(), CompressionState::Prepared);
+}

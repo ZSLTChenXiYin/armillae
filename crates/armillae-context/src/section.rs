@@ -358,6 +358,11 @@ impl SectionContextBuilder {
     /// Build the paradigm; validates labels and freezes the mapping and the
     /// `record_section` tool schema.
     pub fn build(self) -> Result<SectionContext, ContextError> {
+        if matches!(self.config.active_window, ActiveWindow::Sections { count: 0 }) {
+            return Err(ContextError::InvalidConfiguration {
+                message: "active window section count must be at least 1".to_owned(),
+            });
+        }
         for name in self.custom_labels.keys() {
             if name.is_empty() {
                 return Err(ContextError::InvalidConfiguration {
@@ -747,6 +752,8 @@ impl SectionContext {
         let cache = self.config.cache_prefix_sections.min(self.sections.len());
         match self.config.active_window {
             ActiveWindow::Sections { count: window } => {
+                // `build` rejects `count == 0` (InvalidConfiguration), so this
+                // clamp is only an invariant guard, not a silent rewrite.
                 let window = window.max(1);
                 self.sections.len().saturating_sub(window).max(cache)
             }
@@ -1041,42 +1048,35 @@ impl Context for SectionContext {
         &mut self,
         target: CompressionTarget,
     ) -> Result<Vec<Message>, ContextError> {
-        self.machine.on_prepare(&target)?;
         let section_id = match target {
             CompressionTarget::Section { id } => id,
         };
-        let index = self.section_index(section_id)?;
-        if self.in_cache_zone(index) {
-            return Err(ContextError::InvalidOperation {
-                message: "cache-zone sections are never compressed".to_owned(),
-            });
-        }
-        let section = &self.sections[index];
-        if section.view != View::Raw {
-            return Err(ContextError::InvalidOperation {
-                message: "section is already compressed".to_owned(),
-            });
-        }
-        if !self.is_compressible_label(&section.label) {
-            return Err(ContextError::InvalidOperation {
-                message: "section label is not compressible".to_owned(),
-            });
-        }
-        if matches!(self.config.tool_turn_policy, ToolTurnPolicy::Reject)
-            && section_has_tool_turns(section)
-        {
-            return Err(ContextError::InvalidOperation {
-                message: "tool turn policy rejects sections with tool turns".to_owned(),
-            });
-        }
+        // 状态机前置条件优先（未评估 → InvalidState；目标不匹配 → InvalidOperation），
+        // 再校验目标硬约束。目标不合法时回滚到已评估状态，被拒绝的请求不得把调用方
+        // 冻结在 Prepared 且没有待提交原文（spec §6.2）。
+        self.machine.on_prepare(&target)?;
+        let index = match self.validate_prepare_target(section_id) {
+            Ok(index) => index,
+            Err(error) => {
+                self.machine.on_prepare_failed();
+                return Err(error);
+            }
+        };
 
-        // 原文先落盘
+        let section = &self.sections[index];
+        // 原文先落盘；Store 失败时回滚到已评估状态，允许下游重试或放弃。
         let snapshot = OriginalSnapshot {
             section_id,
             messages: flatten_turns(&section.turns),
             version: section.version,
         };
-        let original_ref = self.persist_original(snapshot)?;
+        let original_ref = match self.persist_original(snapshot) {
+            Ok(original_ref) => original_ref,
+            Err(error) => {
+                self.machine.on_prepare_failed();
+                return Err(error);
+            }
+        };
         self.pending_original = Some((section_id, original_ref.clone()));
 
         // 指令消息 + 目标内容（下游零组装）
@@ -1144,15 +1144,17 @@ impl Context for SectionContext {
     }
 
     fn abandon_compression(&mut self) -> Result<(), ContextError> {
-        self.machine.on_abandon()?;
+        // 先删除已归档原文，成功后再清待提交引用并重置状态机：删除失败时保留
+        // pending_original 与 Prepared 状态，调用方仍可重试清理（spec §6.2）。
         if let (Some((_section_id, original_ref)), Some(session)) =
-            (self.pending_original.take(), self.session_id.as_deref())
+            (self.pending_original.as_ref(), self.session_id.as_deref())
         {
             self.store
-                .delete_original(session, &original_ref)
+                .delete_original(session, original_ref)
                 .map_err(ContextError::from)?;
         }
-        Ok(())
+        self.pending_original = None;
+        self.machine.on_abandon()
     }
 }
 
@@ -1183,6 +1185,37 @@ impl SectionContext {
         }
         self.best_sealed_candidate()
             .map(|section| CompressionTarget::Section { id: section.id })
+    }
+
+    /// Validate a compression target against the section hard constraints
+    /// without mutating pipeline state (spec §6.2: a rejected request must not
+    /// change the compression state). Returns the section index.
+    fn validate_prepare_target(&self, section_id: u64) -> Result<usize, ContextError> {
+        let index = self.section_index(section_id)?;
+        if self.in_cache_zone(index) {
+            return Err(ContextError::InvalidOperation {
+                message: "cache-zone sections are never compressed".to_owned(),
+            });
+        }
+        let section = &self.sections[index];
+        if section.view != View::Raw {
+            return Err(ContextError::InvalidOperation {
+                message: "section is already compressed".to_owned(),
+            });
+        }
+        if !self.is_compressible_label(&section.label) {
+            return Err(ContextError::InvalidOperation {
+                message: "section label is not compressible".to_owned(),
+            });
+        }
+        if matches!(self.config.tool_turn_policy, ToolTurnPolicy::Reject)
+            && section_has_tool_turns(section)
+        {
+            return Err(ContextError::InvalidOperation {
+                message: "tool turn policy rejects sections with tool turns".to_owned(),
+            });
+        }
+        Ok(index)
     }
 
     /// 压缩候选硬约束：固化区 ∩ Raw ∩ 可压缩标签；`Reject` 策略下含工具轮次的小节排除

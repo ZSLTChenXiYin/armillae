@@ -114,6 +114,16 @@ impl CompressionMachine {
         }
     }
 
+    /// Roll a failed preparation back from `Prepared` to `Evaluated`: the
+    /// evaluated target is still remembered, so the caller can retry
+    /// `prepare` or `abandon` instead of being frozen in `Prepared` without a
+    /// pending original (spec §6.2).
+    pub(crate) fn on_prepare_failed(&mut self) {
+        if self.state == State::Prepared {
+            self.state = State::Evaluated;
+        }
+    }
+
     /// Abandon from any state; from `Idle` this is a no-op success.
     pub(crate) fn on_abandon(&mut self) -> Result<(), ContextError> {
         if self.state != State::Idle {
