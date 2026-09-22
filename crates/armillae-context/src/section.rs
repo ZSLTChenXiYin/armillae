@@ -358,7 +358,10 @@ impl SectionContextBuilder {
     /// Build the paradigm; validates labels and freezes the mapping and the
     /// `record_section` tool schema.
     pub fn build(self) -> Result<SectionContext, ContextError> {
-        if matches!(self.config.active_window, ActiveWindow::Sections { count: 0 }) {
+        if matches!(
+            self.config.active_window,
+            ActiveWindow::Sections { count: 0 }
+        ) {
             return Err(ContextError::InvalidConfiguration {
                 message: "active window section count must be at least 1".to_owned(),
             });
